@@ -1,0 +1,5 @@
+// Copy this file to Config/Local.xcconfig (which git ignores) and put in your own Apple Developer team.
+// Find the team ID in Xcode › Settings › Accounts › your Apple ID › Team (a free Personal Team works).
+DEVELOPMENT_TEAM = YOURTEAMID
+// The same ID in lower case; it makes the app's bundle ID unique to you (uk.oxhack.tempo.<id>).
+DEVELOPMENT_TEAM_LOWER = yourteamid

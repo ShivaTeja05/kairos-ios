@@ -1,0 +1,14 @@
+Config/Local.xcconfig
+*.xcodeproj/
+build/
+.build/
+# Staging folders used while building features in parallel; their code is merged into TempoApp/Agents.
+AgentsWIP*/
+# Xcode and macOS clutter
+xcuserdata/
+DerivedData/
+*.xcresult
+.DS_Store
+# Local logs and backups
+*.log
+*.orig

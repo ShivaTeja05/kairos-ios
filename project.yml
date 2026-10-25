@@ -1,0 +1,60 @@
+name: Tempo
+options:
+  bundleIdPrefix: uk.oxhack.tempo
+  deploymentTarget:
+    iOS: "17.0"
+configFiles:
+  Debug: Config/Local.xcconfig
+  Release: Config/Local.xcconfig
+packages:
+  ElevenLabs:
+    url: https://github.com/elevenlabs/elevenlabs-swift-sdk.git
+    exactVersion: 3.4.0
+  # Same version the ElevenLabs SDK resolves; imported directly only to release the always-prepared mic when a call ends.
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift.git
+    exactVersion: 2.18.0
+targets:
+  Tempo:
+    type: application
+    platform: iOS
+    sources: [TempoApp]
+    dependencies:
+      - package: ElevenLabs
+      - package: LiveKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: uk.oxhack.tempo.$(DEVELOPMENT_TEAM_LOWER)
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Kairos
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Kairos listens when you talk to it, so it can help you."
+        INFOPLIST_KEY_NSFaceIDUsageDescription: "Kairos uses Face ID to make sure it's you before it calls, sends or claims anything."
+        INFOPLIST_KEY_NSCameraUsageDescription: "Kairos uses the camera to photograph a letter, bill or form so it can read it to you."
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Kairos can read a letter from a photo you already took."
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Kairos saves the photos you take with it to your Photos, so you can post or send them."
+        # On-phone agents (TempoApp/Agents): without these, iOS stops the app when it asks for the permission.
+        INFOPLIST_KEY_NSContactsUsageDescription: "Kairos looks up the people you ask it to call or message. Their details stay on this iPhone."
+        INFOPLIST_KEY_NSRemindersFullAccessUsageDescription: "Kairos adds the reminders you ask for, like taking your tablets or paying a bill."
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "Kairos puts your appointments in your calendar and tells you what's on each day."
+        INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription: "Kairos puts the appointments you ask for in your calendar."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Kairos listens to what you say and turns it into words, so it can help you. Where your phone can, this happens on the phone itself."
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+    info:
+      path: TempoApp/Info.plist
+      properties:
+        UIBackgroundModes: [audio]
+        CFBundleURLTypes:
+          - CFBundleURLName: uk.oxhack.tempo
+            CFBundleURLSchemes: [kairos, tempo]
+        UILaunchScreen: {}
+        NSAlarmKitUsageDescription: "Kairos sets the alarms and timers you ask for, so they ring even when your phone is on silent."
+        LSApplicationQueriesSchemes: [whatsapp]
+        # The phone operator talks to the iCTRL runner on this phone over loopback (http://127.0.0.1:8200).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # iOS 26 BGContinuedProcessingTask for long phone-operator jobs (one id per run under this prefix).
+        BGTaskSchedulerPermittedIdentifiers: ["$(PRODUCT_BUNDLE_IDENTIFIER).operator.*"]
