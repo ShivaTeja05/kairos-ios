@@ -125,9 +125,10 @@ actor ResearchTeam {
         self.limits = limits
     }
 
-    /// The team as Kairos settings make it: Gemini with the Keychain key, the model the person chose.
+    /// The team as Kairos settings make it: Gemini with the Keychain keys, the model the person chose. The team is
+    /// background work, so the person's own requests to Gemini go first (GeminiRateLimiter).
     static func fromSettings() -> ResearchTeam? {
-        guard let model = AgentSettings.provider(timeout: 20), let search = GroundedSearch.fromSettings(timeout: 25) else { return nil }
+        guard let model = AgentSettings.provider(timeout: 20, priority: .background), let search = GroundedSearch.fromSettings(timeout: 25) else { return nil }
         return ResearchTeam(model: model, search: search)
     }
 
@@ -353,14 +354,15 @@ actor ResearchTeam {
             case .noKey: throw ResearchError.noKey
             case .badKey: throw ResearchError.badKey
             case .offline: throw ResearchError.offline
-            case .rateLimited:
-                await pacer.coolDown(20)
-                throw ResearchError.rateLimited(retryAfter: nil, daily: false)
+            // The planner's model was busy (429): code writes the questions. The researchers search with their own
+            // model through the patient pacer, which waits out any hold Google gives them.
             default: return (Self.standardQuestions(topic, count: count), false)
             }
         } catch let e as ResearchError {
-            if case .rateLimited = e { throw e }
-            if e == .dailyLimit { throw e }
+            // Today's allowance is gone: no researcher could search either.
+            if e.isDailyLimit { throw e }
+            // Google's hold after a 429 (or our own per-minute count) is longer than the planner may wait: code writes
+            // the questions and the researchers wait the hold out, instead of the whole run failing at once.
             return (Self.standardQuestions(topic, count: count), false)
         } catch {
             if error is CancellationError { throw error }

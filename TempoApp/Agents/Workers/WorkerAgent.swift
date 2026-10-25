@@ -18,8 +18,10 @@ import Foundation
 // (ResearchPacer: one search at a time, a few seconds apart, waiting out Google's hold after a 429, with a
 // "Waiting 28 s for Google's search limit…" step on the board). A run gets 3 searches that come back; a repeated or
 // near-repeated query is refused; while Google has searching paused the model is told to read the pages it already
-// has instead. Honesty: a run that searched but got nothing back and read nothing FAILS with a plain reason ("Tap Try
-// again in a minute") instead of handing in what the model knew already, and a result with no sources says so first.
+// has instead. A search (its wait and its requests) ends before the write-up's time, so it can't push the run past its
+// limit and the pool's watchdog. Honesty: a run that searched but got nothing back and read nothing FAILS with a plain
+// reason ("Tap Try again in a minute") instead of handing in what the model knew already, and a result with no sources
+// says so first.
 
 enum WorkerEvent: Sendable, Equatable {
     case step(kind: String, text: String)
@@ -275,16 +277,31 @@ struct WorkerAgent: Sendable {
             return Self.searchPaused(ledger, words: "Searching is paused by Google's search limit.", seconds: seconds)
         }
 
+        // The whole search (its turn, Google's hold, the request and its one retry) is over before the write-up's
+        // time: it isn't started without a few seconds for it, and one still going then is stopped.
+        let left = turn.deadline.timeIntervalSince(now)
+        let room = left - limits.wrapUpReserve / 2
+        if room < Self.minSearchRoom {
+            await report(.step(kind: "search", text: "Didn't search: there isn't enough time left in this job"))
+            return Self.searchRefused(ledger, "There isn't enough time left in this job for another web search.")
+        }
+
         await report(.step(kind: "search", text: "Searching: " + WorkerSpeech.clip(query, 120)))
         guard var search = kit.search() else { return Self.error("Web search isn't available right now. Try find_papers or read_url.") }
         // Patient: wait for our turn and out Google's hold (shown on the board), but not into the write-up's time.
-        search.maxPacingWait = max(0, min(limits.searchPatience, turn.deadline.timeIntervalSince(now) - limits.wrapUpReserve))
+        // A few seconds of turn-taking are always allowed while the search can still come back in time, so the gap
+        // between two searches late in a job isn't mistaken for Google's limit.
+        search.maxPacingWait = max(min(5, room / 2), min(limits.searchPatience, left - limits.wrapUpReserve))
+        search.timeout = min(search.timeout, room)
         ledger.searches.attempts += 1
         do {
-            let found = try await search.search(query, system: Self.searchSystem(now), pacing: { event in
-                guard case .waiting(let seconds, _) = event else { return }
-                await report(.step(kind: "search", text: "Waiting \(seconds) s for Google's search limit…"))
-            })
+            let patient = search
+            let found = try await WorkerTimeout.run(room) {
+                try await patient.search(query, system: Self.searchSystem(now), pacing: { event in
+                    guard case .waiting(let seconds, _) = event else { return }
+                    await report(.step(kind: "search", text: "Waiting \(seconds) s for Google's search limit…"))
+                })
+            }
             ledger.searches.succeeded.append(query)
             ledger.searches.pausedUntil = nil
             let sources = Array(found.sources.prefix(8))
@@ -305,16 +322,18 @@ struct WorkerAgent: Sendable {
             }
             return .object(o)
         } catch {
-            if error is CancellationError { return Self.error("Stopped.") }
-            let research = error as? ResearchError
-            let words = (error as? LocalizedError)?.errorDescription ?? "The search didn't work."
+            if error is CancellationError || Task.isCancelled { return Self.error("Stopped.") }
+            // Out of time for this search (WorkerTimeout) counts as a search that took too long.
+            let research = error as? ResearchError ?? (error is WorkerTimeout.Expired ? .timedOut : nil)
+            let words = research?.errorDescription ?? (error as? LocalizedError)?.errorDescription ?? "The search didn't work."
             await report(.step(kind: "error", text: "The search didn't work: " + words))
             ledger.searches.lastError = research
             guard let research, research.isSearchLimit else { return Self.error(words) }
             // Google's limit: searching is paused. The model is told to read what it has instead of searching again.
             ledger.searches.limitFailures += 1
             if research.isDailyLimit { ledger.searches.daily = true }
-            var hold = await search.pacer.holdRemaining()
+            // With a backup key the pause is the shorter of the two keys' holds.
+            var hold = await search.holdRemaining()
             if hold <= 0, case .busy(let s) = research { hold = Double(s) }
             if hold <= 0 { hold = GroundedSearch.defaultHold }
             ledger.searches.pausedUntil = hold.isFinite ? kit.clock().addingTimeInterval(hold) : .distantFuture
@@ -322,6 +341,9 @@ struct WorkerAgent: Sendable {
             return Self.searchPaused(ledger, words: words, seconds: hold.isFinite && !ledger.searches.daily ? max(1, Int(hold.rounded(.up))) : nil)
         }
     }
+
+    /// The fewest seconds a search needs before the write-up's time (half the wrap-up reserve before the deadline).
+    static let minSearchRoom: TimeInterval = 3
 
     /// web_search wasn't run (no request went to Google): why, and what to do instead.
     static func searchRefused(_ ledger: WorkerLedger, _ why: String) -> JSONValue {

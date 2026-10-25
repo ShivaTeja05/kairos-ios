@@ -139,7 +139,8 @@ struct TrustRevokeTool: KairosTool {
     }
     let risk = Risk.read
 
-    static let everythingPhrases = ["stop everything", "stop all my agents", "stop all agents", "take back all permissions",
+    // "stop all my agents" only stops the worker agents (Workers' stop_agent); it doesn't take back permissions.
+    static let everythingPhrases = ["stop everything", "take back all permissions",
                                     "take back everything", "revoke all", "revoke everything", "turn off all permissions",
                                     "cancel all permissions", "remove all permissions"]
 

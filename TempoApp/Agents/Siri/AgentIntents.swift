@@ -209,6 +209,7 @@ enum KairosIntentRunner {
     @MainActor
     static func run(_ words: String, source: AgentSource, budget: TimeInterval = budget) async -> AgentOutcome? {
         let agent = KairosAgent.shared
+        MemoryContext.install()
         let started = Date()
         while agent.working, Date().timeIntervalSince(started) < busyWait {
             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -219,7 +220,10 @@ enum KairosIntentRunner {
         return await withCheckedContinuation { (continuation: CheckedContinuation<AgentOutcome?, Never>) in
             let race = KairosIntentRace(continuation)
             Task { @MainActor in
-                race.finish(await agent.handle(words, source: source))
+                ConversationStore.shared.currentSource = .siri
+                let outcome = await agent.handle(words, source: source)
+                ConversationStore.shared.currentSource = .app
+                race.finish(outcome)
             }
             race.timer = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))

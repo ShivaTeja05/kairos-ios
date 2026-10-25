@@ -156,9 +156,23 @@ final class KairosAgent: ObservableObject {
         if KairosRequestScope.active { return await handleBody(words, source: source, images: images) }
         var polls = 0
         while working, polls < 150 { try? await Task.sleep(nanoseconds: 200_000_000); polls += 1 }
-        return await KairosRequestScope.$active.withValue(true) {
-            await handleBody(words, source: source, images: images)
+        // When one of this request's Gemini calls has to wait (Google's limit, or another model being asked), the
+        // screen says "One moment…" instead of sitting silent.
+        let onWait: @Sendable () -> Void = { [weak self] in Task { @MainActor in self?.showWaiting() } }
+        return await GeminiCallScope.$onWait.withValue(onWait) {
+            await KairosRequestScope.$active.withValue(true) {
+                await handleBody(words, source: source, images: images)
+            }
         }
+    }
+
+    static let waitingWords = "One moment…"
+
+    /// One of this request's model calls is waiting for more than a second.
+    private func showWaiting() {
+        guard working else { return }
+        workingOn = Self.waitingWords
+        postProgress(workingOn)
     }
 
     private func handleBody(_ words: String, source: AgentSource, images: [Data]) async -> AgentOutcome {
@@ -246,10 +260,23 @@ final class KairosAgent: ObservableObject {
         // A Shortcut's text is information: the model only gets the look-up tools for it.
         let offered = offeredTools(for: source)
         let offeredNames = Set(offered.map(\.name))
+        // Only the helpers the words call for are declared (far fewer tokens per request); the model may still call
+        // anything on offer.
+        var (declared, narrowed) = declaredTools(for: words, offered: offered, source: source)
+        if dryRun, narrowed { dryRunLog.append("(declared: \(declared.map(\.name).joined(separator: ", ")))") }
         do {
             for _ in 0..<maxSteps {
-                let reply = try await model.step(system: systemPrompt(ctx), history: history() + turn,
-                                                 tools: offered.map(\.declaration), requireTool: false)
+                let reply = try await model.step(system: systemPrompt(ctx, declared: narrowed ? declared : nil),
+                                                 history: history() + turn,
+                                                 tools: declared.map(\.declaration), requireTool: false)
+                if workingOn == Self.waitingWords { workingOn = nil; postProgress(nil) }  // the wait is over
+                if narrowed, reply.calls.isEmpty, spoken.isEmpty, Self.soundsUnable(reply.text) || Self.claimsAction(reply.text) {
+                    // The words didn't name the helper this needs: the same step again, with every tool declared.
+                    narrowed = false
+                    declared = offered
+                    if dryRun { dryRunLog.append("(asked again with every tool declared)") }
+                    continue
+                }
                 turn.append(reply.content)
                 if reply.calls.isEmpty, spoken.isEmpty, !nudged, Self.claimsAction(reply.text) {
                     // "I've added a reminder" with no tool call: nothing was done. Ask once more before speaking.
@@ -268,6 +295,10 @@ final class KairosAgent: ObservableObject {
                         if dryRun { dryRunProposed.append(call.name); dryRunLog.append("\(call.name): not offered") }
                         responses.append((call, ["error": .string("\(call.name) isn't available right now.")]))
                         continue
+                    }
+                    // On offer but not declared (the model knew it from earlier): declared from now on in this request.
+                    if !declared.contains(where: { $0.name == call.name }), let tool = offered.first(where: { $0.name == call.name }) {
+                        declared.append(tool)
                     }
                     let out = await run(call, ctx: &ctx)
                     responses.append((call, out.response))
@@ -494,6 +525,53 @@ final class KairosAgent: ObservableObject {
                                         userInfo: text.map { ["text": $0] } ?? [:])
     }
 
+    // MARK: - Which tools to declare
+
+    /// The tools declared to the model for one request, and whether that is fewer than all on offer: the
+    /// specialists the words call for (ToolPicker), the ones the last request used (so "make it 8 instead" still
+    /// reaches the alarm), and the small core set. Everything when nothing matched, and in focus mode (a helper's
+    /// own short list). Function calls in earlier turns for tools not declared now are fine (measured on Gemini
+    /// 3.5 Flash and 2.5 Flash, 25 Oct 2026); a tool called during this request stays declared for its later steps.
+    func declaredTools(for words: String, offered: [any KairosTool], source: AgentSource) -> (tools: [any KairosTool], narrowed: Bool) {
+        guard focus(for: source) == nil else { return (offered, false) }
+        let text = ([words] + (source == .app ? Array(voiceContext.suffix(2)) : [])).joined(separator: "\n")
+        // Clear words beyond the table: the person's saved helpers by name, and the people they taught Kairos.
+        let helperNames = StudioSnapshot.shared.entries.map(\.name)
+        let taughtNames = PeopleDirectory.shared.taught().values.flatMap { $0 }
+            .compactMap { $0.name.folded.split(separator: " ").first.map(String.init) }.filter { $0.count >= 2 }
+        let extra = [StudioToolNames.agentID: helperNames, "people": Array(Set(taughtNames))]
+        guard var groups = ToolPicker.groups(for: text, extra: extra) else { return (offered, false) }
+        var owner: [String: String] = [:]
+        for agent in specialists { for tool in agent.tools { owner[tool.name] = agent.id } }
+        for name in previousExecuted.map(\.name) + Self.calledNames(in: turns.last ?? []) {
+            if let id = owner[name] { groups.insert(id) }
+        }
+        let picked = offered.filter { tool in
+            guard !ToolPicker.core.contains(tool.name), let id = owner[tool.name], ToolPicker.known.contains(id) else { return true }
+            return groups.contains(id)
+        }
+        return picked.count < offered.count ? (picked, true) : (offered, false)
+    }
+
+    /// The tools called in these contents, in order.
+    nonisolated static func calledNames(in contents: [JSONValue]) -> [String] {
+        contents.flatMap { $0["parts"]?.array ?? [] }.compactMap { $0["functionCall"]?["name"]?.string }
+    }
+
+    /// The model says it can't do something ("I can't set alarms", "I don't have a way to…"): with only some tools
+    /// declared, that may just mean the right one wasn't. A false match costs one extra step, nothing else.
+    static func soundsUnable(_ text: String) -> Bool {
+        let t = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+        let patterns = [
+            "\\bi (can't|cannot|can not|am unable to|am not able to)\\b",
+            "\\bi'm (unable|not able) to\\b",
+            "\\bi (don't|do not) have (a |the |any )?(way|tool|ability|access|option)",
+            "\\b(isn't|is not) something i can\\b",
+            "\\bi'm not (set up|able)\\b",
+        ]
+        return patterns.contains { t.range(of: $0, options: .regularExpression) != nil }
+    }
+
     /// Words that report an action ("I've set…", "Your reminder is added", "Done!"). Used only to decide whether
     /// to ask the model once more when no tool ran; a false match costs one extra step, nothing else.
     static func claimsAction(_ text: String) -> Bool {
@@ -530,12 +608,15 @@ final class KairosAgent: ObservableObject {
         }
     }
 
-    private func systemPrompt(_ ctx: TurnContext) -> String {
+    /// `declared`: when only some tools are declared, only their helpers' instructions are included.
+    private func systemPrompt(_ ctx: TurnContext, declared: [any KairosTool]? = nil) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_GB")
         f.timeZone = ctx.timeZone
         f.dateFormat = "EEEE d MMMM yyyy, HH:mm"
-        let helpers = specialists.map { "- \($0.title): \($0.instructions)" }.joined(separator: "\n")
+        let names = declared.map { Set($0.map(\.name)) }
+        let listed = names.map { names in specialists.filter { $0.tools.contains { names.contains($0.name) } } } ?? specialists
+        let helpers = listed.map { "- \($0.title): \($0.instructions)" }.joined(separator: "\n")
         let focus = self.focus(for: ctx.source).map { "\n" + StudioPrompts.focusSection($0, tools: offeredTools(for: ctx.source).map(\.name)) } ?? ""
         return """
         You are Kairos, a patient, kind helper that lives on this iPhone. You help people who are not confident with \

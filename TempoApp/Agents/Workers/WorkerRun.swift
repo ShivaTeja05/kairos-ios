@@ -200,7 +200,8 @@ struct WorkerKit: Sendable {
     var clock: @Sendable () -> Date
 
     static var live: WorkerKit {
-        WorkerKit(model: { AgentSettings.provider(timeout: $0) },
+        // Background priority: the person's own requests to Gemini go first (GeminiRateLimiter).
+        WorkerKit(model: { AgentSettings.provider(timeout: $0, priority: .background) },
                   search: { GroundedSearch.fromSettings(timeout: 25) },
                   web: WebReader(),
                   phone: .live,

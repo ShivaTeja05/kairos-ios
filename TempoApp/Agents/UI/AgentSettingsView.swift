@@ -6,6 +6,9 @@ import UIKit
 struct AgentSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var keyEnd: String? = AgentSettingsView.savedKeyEnd()
+    @State private var backupEnd: String? = AgentSettingsView.savedBackupEnd()
+    @State private var backupNote: String?
+    @State private var backupNoteIsGood = false
     @State private var keyNote: String?
     @State private var keyNoteIsGood = false
     @State private var checking = false
@@ -98,13 +101,84 @@ struct AgentSettingsView: View {
                 .font(AgentUIStyle.font(17))
                 .foregroundStyle(AgentUIStyle.soft)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if keyEnd != nil { backupKeyRows }
         }
+    }
+
+    /// The optional second key, under the main one.
+    @ViewBuilder private var backupKeyRows: some View {
+        Divider().padding(.vertical, 4)
+        Text("Backup key (optional)")
+            .font(AgentUIStyle.font(22, .bold))
+            .foregroundStyle(AgentUIStyle.ink)
+            .accessibilityAddTraits(.isHeader)
+        Label {
+            Text(backupEnd.map { "Backup key saved ✓ (ends …\($0))" } ?? "No backup key")
+        } icon: {
+            Image(systemName: backupEnd == nil ? "key" : "checkmark.seal.fill")
+        }
+        .font(AgentUIStyle.font(20, .semibold))
+        .foregroundStyle(backupEnd == nil ? AgentUIStyle.soft : AgentUIStyle.green)
+
+        bigButton("Paste backup key", icon: "doc.on.clipboard", filled: false) { pasteBackupKey() }
+        if backupEnd != nil {
+            bigButton("Remove", icon: "trash", filled: false, tint: AgentUIStyle.red) { removeBackupKey() }
+        }
+        if let backupNote {
+            Text(backupNote)
+                .font(AgentUIStyle.font(19, .medium))
+                .foregroundStyle(backupNoteIsGood ? AgentUIStyle.green : AgentUIStyle.amber)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.updatesFrequently)
+        }
+        Text("A second key from another Google project doubles how much Kairos can do per minute.")
+            .font(AgentUIStyle.font(17))
+            .foregroundStyle(AgentUIStyle.soft)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// The last three characters of the saved key, or nil when there's no usable key.
     static func savedKeyEnd() -> String? {
         guard AgentSettings.hasKey, let key = KeyStore.get(AgentSettings.keyName) else { return nil }
         return String(key.suffix(3))
+    }
+
+    /// The last three characters of the backup key, or nil when there isn't one.
+    static func savedBackupEnd() -> String? {
+        AgentSettings.backupKey.map { String($0.suffix(3)) }
+    }
+
+    private func pasteBackupKey() {
+        let board = UIPasteboard.general
+        guard board.hasStrings, let text = board.string,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            tellBackup("There's nothing to paste. Copy the backup key first, then tap Paste.", good: false)
+            return
+        }
+        guard let cleaned = AgentSettings.cleanKey(text) else {
+            tellBackup("That doesn't look like a Gemini key. Copy the whole key, then tap Paste again.", good: false)
+            return
+        }
+        guard cleaned != AgentSettings.key else {
+            tellBackup("That's the same key as the main one. A backup key needs to come from another Google project.", good: false)
+            return
+        }
+        AgentSettings.saveBackupKey(cleaned)
+        board.items = []  // the key shouldn't stay on the clipboard
+        backupEnd = Self.savedBackupEnd()
+        tellBackup("Saved. I've cleared it from the clipboard. Kairos will use it when Google says the main key is busy.", good: true)
+    }
+
+    private func removeBackupKey() {
+        AgentSettings.removeBackupKey()
+        backupEnd = nil
+        tellBackup("Backup key removed. Kairos keeps using the main key.", good: true)
+    }
+
+    private func tellBackup(_ text: String, good: Bool) {
+        backupNote = text
+        backupNoteIsGood = good
     }
 
     private func pasteKey() {
@@ -124,10 +198,12 @@ struct AgentSettingsView: View {
     }
 
     private func checkKey() async {
-        guard let provider = AgentSettings.provider(timeout: 15) else {
+        // This key and this model only: no backup model or key standing in, so a wrong model name still shows.
+        guard let key = AgentSettings.key else {
             note(ModelError.noKey.errorDescription ?? "There's no key yet.", good: false)
             return
         }
+        let provider = GeminiProvider(model: AgentSettings.model, apiKey: key, timeout: 15)
         checking = true
         defer { checking = false }
         do {
@@ -148,6 +224,7 @@ struct AgentSettingsView: View {
     private func removeKey() {
         KeyStore.set(AgentSettings.keyName, "")  // KeyStore has no delete; an empty key counts as no key
         keyEnd = nil
+        backupEnd = Self.savedBackupEnd()
         note("Key removed. Alarms, timers and calls still work.", good: true)
     }
 

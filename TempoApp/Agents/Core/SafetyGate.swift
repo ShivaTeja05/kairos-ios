@@ -47,7 +47,7 @@ struct SafetyGate: Sendable {
     /// Tools whose effect is saved and replayed later.
     static let persistent: Set<String> = ["create_routine", "save_last_as_routine", "delete_routine", "create_agent",
                                           "edit_agent", "delete_agent", "remember_for_agent", "import_agent",
-                                          "remember_relation"]
+                                          "remember_relation", "remember_fact", "forget_memory"]
 
     struct Leak: Equatable { var kind: String; var isAddress: Bool }
 

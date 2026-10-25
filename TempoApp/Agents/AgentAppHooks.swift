@@ -43,6 +43,8 @@ enum AgentAppHooks {
         _ = KairosAgent.shared   // registers AgentHooks.runner for Routines, the Phone operator, Studio and Present mode
         // Worker agents: Kairos's picture of the phone, the voice hearing when one finishes, the board's voice.
         WorkerWiring.install()
+        // Memory: the chat history, the few memories each request needs in Gemini's picture of the phone.
+        MemoryContext.install()
         // Launched with -KairosSelfTest: run the routing self-test (dry run) once the first screen is up.
         KairosSelfTest.presentIfLaunchedForIt()
         // Siri learns new routine and helper names.

@@ -124,10 +124,19 @@ enum ResearchError: LocalizedError, Equatable {
 struct GroundedTransport: Sendable {
     var send: @Sendable (URLRequest) async throws -> (Data, URLResponse)
     /// Real requests also take a slot in the core's app-wide GeminiRateLimiter, so Kairos's other Gemini calls
-    /// (the router, other helpers) see the researchers' searches in the same per-minute count.
+    /// (the router, other helpers) see the researchers' searches in the same per-minute count (per model and key).
+    /// Searches are background work: they give way to the person's own requests.
     static let live = GroundedTransport { request in
-        await GeminiRateLimiter.shared.waitForSlot()
-        return try await URLSession.shared.data(for: request)
+        let limiter = GeminiRateLimiter.shared
+        let lease = await limiter.waitForSlot(GeminiRateLimiter.slot(for: request), priority: .background)
+        do {
+            let reply = try await URLSession.shared.data(for: request)
+            await limiter.finished(lease)
+            return reply
+        } catch {
+            await limiter.finished(lease)
+            throw error
+        }
     }
 }
 
@@ -158,6 +167,8 @@ struct SearchTicket: Sendable, Equatable {
 ///   wait fits the caller's budget and is no longer than `patience` (45 s);
 /// - when Google says the key's allowance for today is used up, searches fail at once with `.dailyLimit` (no
 ///   request is sent) until midnight Pacific time, looking again every 10 minutes in case billing was turned on.
+/// Google's holds and the daily stop belong to one key: each key has its own `lane` (0 = the main key, 1 = the
+/// backup key), so a hold on the main key doesn't stop the backup key searching. Turn-taking and the count are shared.
 /// UserDefaults "kairos.search.rpm" raises the per-minute count for a paid key.
 actor ResearchPacer {
     static let shared = ResearchPacer(limit: ResearchPacer.configuredLimit)
@@ -181,8 +192,10 @@ actor ResearchPacer {
     /// A search that never handed its turn back frees it after this long.
     let leaseTimeout: TimeInterval
     private var sent: [Date] = []
-    private var coolUntil: Date?
-    private var dailyUntil: Date?
+    /// Google's hold after a 429, per lane (key).
+    private var coolUntil: [Int: Date] = [:]
+    /// Today's allowance is gone, per lane (key).
+    private var dailyUntil: [Int: Date] = [:]
     private var lastSearchStart: Date?
     private var searching: (id: UUID, since: Date)?
     private var queue: [UUID] = []
@@ -204,7 +217,7 @@ actor ResearchPacer {
     /// Waits for a turn to send one grounded search, for at most `maxWait` seconds, and keeps the turn until
     /// `endSearch`. Throws `.dailyLimit` at once when today's allowance is gone, `.rateLimited` when Google's hold
     /// is longer than the budget or than `patience`, `.busy` when our own count or the queue won't clear in time.
-    func beginSearch(maxWait: TimeInterval, report: SearchPacingReport? = nil) async throws -> SearchTicket {
+    func beginSearch(maxWait: TimeInterval, report: SearchPacingReport? = nil, lane: Int = 0) async throws -> SearchTicket {
         let id = UUID()
         let start = Date()
         queue.append(id)
@@ -213,16 +226,16 @@ actor ResearchPacer {
         while true {
             try Task.checkCancellation()
             let now = Date()
-            if let daily = dailyUntil {
+            if let daily = dailyUntil[lane] {
                 if daily > now { throw ResearchError.dailyLimit }
-                dailyUntil = nil
+                dailyUntil[lane] = nil
             }
             sent.removeAll { now.timeIntervalSince($0) >= window }
             if let s = searching, now.timeIntervalSince(s.since) >= leaseTimeout { searching = nil }
             let waited = now.timeIntervalSince(start)
 
-            // Google's hold: nobody searches until it is over.
-            if let cool = coolUntil, cool > now {
+            // Google's hold: nobody searches with this key until it is over.
+            if let cool = coolUntil[lane], cool > now {
                 let wait = cool.timeIntervalSince(now)
                 let googleSeconds = wait / holdScale
                 guard googleSeconds <= patience + 0.5, waited + wait <= maxWait else {
@@ -276,19 +289,19 @@ actor ResearchPacer {
         if searching?.id == ticket.id { searching = nil }
     }
 
-    /// How long until searching may start again: 0 when it can, the hold's length after a 429 (in real seconds),
-    /// `.infinity` when today's allowance is gone.
-    func holdRemaining() -> TimeInterval {
+    /// How long until searching with this lane's key may start again: 0 when it can, the hold's length after a 429
+    /// (in real seconds), `.infinity` when today's allowance is gone.
+    func holdRemaining(lane: Int = 0) -> TimeInterval {
         let now = Date()
-        if let daily = dailyUntil, daily > now { return .infinity }
-        if let cool = coolUntil, cool > now { return cool.timeIntervalSince(now) }
+        if let daily = dailyUntil[lane], daily > now { return .infinity }
+        if let cool = coolUntil[lane], cool > now { return cool.timeIntervalSince(now) }
         return 0
     }
 
     /// Google said the allowance for today is used up: no more requests until it resets (midnight Pacific time),
     /// looking again every 10 minutes in case the owner turned on billing.
-    func markDailyLimit(now: Date = Date()) {
-        dailyUntil = min(Self.nextPacificMidnight(after: now), now.addingTimeInterval(600))
+    func markDailyLimit(now: Date = Date(), lane: Int = 0) {
+        dailyUntil[lane] = min(Self.nextPacificMidnight(after: now), now.addingTimeInterval(600))
     }
 
     static func nextPacificMidnight(after now: Date) -> Date {
@@ -309,14 +322,14 @@ actor ResearchPacer {
         while true {
             try Task.checkCancellation()
             let now = Date()
-            if let daily = dailyUntil {
+            if let daily = dailyUntil[0] {
                 if daily > now { throw ResearchError.dailyLimit }
-                dailyUntil = nil
+                dailyUntil[0] = nil
             }
             sent.removeAll { now.timeIntervalSince($0) >= window }
             var wait: TimeInterval = 0
             var cooling = false
-            if let cool = coolUntil, cool > now {
+            if let cool = coolUntil[0], cool > now {
                 wait = cool.timeIntervalSince(now)
                 cooling = true
             } else if sent.count >= limit, let oldest = sent.first {
@@ -336,17 +349,18 @@ actor ResearchPacer {
         }
     }
 
-    /// Google said 429: hold every request for this long, in Google's seconds (capped at 90 s; tests scale it).
-    func coolDown(_ seconds: Double) {
+    /// Google said 429: hold every request with this lane's key for this long, in Google's seconds (capped at 90 s;
+    /// tests scale it).
+    func coolDown(_ seconds: Double, lane: Int = 0) {
         let until = Date().addingTimeInterval(min(max(seconds, 1), 90) * holdScale)
-        if let current = coolUntil, current > until { return }
-        coolUntil = until
+        if let current = coolUntil[lane], current > until { return }
+        coolUntil[lane] = until
     }
 
     func reset() {
         sent = []
-        coolUntil = nil
-        dailyUntil = nil
+        coolUntil = [:]
+        dailyUntil = [:]
         lastSearchStart = nil
         searching = nil
         granted = 0
@@ -433,6 +447,11 @@ struct GroundedSearch: Sendable {
     var maxOutputTokens = 1500
     /// Asked once instead when the search model can't search the web (or no longer exists).
     var fallbackModel: String? = AgentSettings.defaultModel
+    /// A key from another Google project: when Google's limit stops a search on `apiKey`, the same request goes
+    /// with this key at once (its own lane in the pacer) instead of waiting out the hold.
+    var backupKey: String? = nil
+    /// The pacer lane of `apiKey`: 0 for the main key, 1 for the backup key.
+    var lane: Int = 0
 
     /// The model that does Google Search. Measured on the team's free key on 25 Oct 2026: the 3.5 models answer every
     /// grounded request with 429 RESOURCE_EXHAUSTED ("check your plan and billing"), while gemini-2.5-flash searches
@@ -448,10 +467,34 @@ struct GroundedSearch: Sendable {
     /// Built from Kairos settings: the key from this phone's Keychain, the search model above, and the person's own
     /// model as the one fallback.
     static func fromSettings(timeout: TimeInterval = 25) -> GroundedSearch? {
-        guard let key = KeyStore.get(AgentSettings.keyName), key.count >= 20 else { return nil }
+        guard let key = AgentSettings.key else { return nil }
         var search = GroundedSearch(model: searchModel, apiKey: key, timeout: timeout)
         search.fallbackModel = searchModel == AgentSettings.model ? nil : AgentSettings.model
+        search.backupKey = AgentSettings.backupKey
         return search
+    }
+
+    /// The backup key, when there is a different one to switch to.
+    var usableBackup: String? {
+        guard lane == 0, let backupKey, backupKey.count >= 20, backupKey != apiKey else { return nil }
+        return backupKey
+    }
+
+    /// This search as the backup key sends it.
+    var onBackupKey: GroundedSearch? {
+        guard let backup = usableBackup else { return nil }
+        var other = self
+        other.apiKey = backup
+        other.backupKey = nil
+        other.lane = 1
+        return other
+    }
+
+    /// How long until this search could go: the shorter of the two keys' holds when there is a backup key.
+    func holdRemaining() async -> TimeInterval {
+        let main = await pacer.holdRemaining(lane: lane)
+        guard main > 0, let other = onBackupKey else { return main }
+        return min(main, await pacer.holdRemaining(lane: other.lane))
     }
 
     var endpoint: URL {
@@ -478,6 +521,10 @@ struct GroundedSearch: Sendable {
     /// The search waits its turn in the pacer (`pacing` hears about long waits); after a 429 it waits out Google's
     /// hold and asks once more, all within `maxPacingWait`.
     func search(_ question: String, system: String, pacing: SearchPacingReport? = nil) async throws -> GroundedAnswer {
+        // The main key is resting after a 429 and the backup key isn't: start on the backup key.
+        if let other = onBackupKey, await pacer.holdRemaining(lane: lane) > 0, await pacer.holdRemaining(lane: other.lane) == 0 {
+            return try await other.search(question, system: system, pacing: pacing)
+        }
         var call = GroundedCall(budget: maxPacingWait, report: pacing)
         do {
             return try await attempt(question, system: system, call: &call)
@@ -503,6 +550,8 @@ struct GroundedSearch: Sendable {
         var sent = 0
         /// The one retry after a 429 has been used.
         var retried = false
+        /// The request has been sent once with the backup key.
+        var usedBackup = false
     }
 
     /// One model, with the one retry without thinking.
@@ -525,6 +574,17 @@ struct GroundedSearch: Sendable {
     private func sendPatiently(_ body: JSONValue, call: inout GroundedCall) async throws -> JSONValue {
         do {
             return try await send(body, call: &call)
+        } catch GroundedRetry.hold(let error, let seconds) where usableBackup != nil && !call.usedBackup {
+            // Google's limit on the main key: the same request with the backup key at once, no waiting.
+            call.usedBackup = true
+            researchLog.notice("Grounded search: 429 on the main key (hold \(Int(seconds.rounded(.up)), privacy: .public) s); asking with the backup key")
+            guard let other = onBackupKey else { throw error }
+            return try await other.sendPatiently(body, call: &call)
+        } catch ResearchError.dailyLimit where usableBackup != nil && !call.usedBackup {
+            call.usedBackup = true
+            researchLog.notice("Grounded search: the main key's allowance for today is used up; asking with the backup key")
+            guard let other = onBackupKey else { throw ResearchError.dailyLimit }
+            return try await other.sendPatiently(body, call: &call)
         } catch GroundedRetry.hold(let error, let seconds) {
             guard !call.retried, seconds <= pacer.patience else { throw error }
             call.retried = true
@@ -587,7 +647,7 @@ struct GroundedSearch: Sendable {
     }
 
     private func send(_ body: JSONValue, call: inout GroundedCall) async throws -> JSONValue {
-        let ticket = try await pacer.beginSearch(maxWait: max(0, call.budget - call.waited), report: call.report)
+        let ticket = try await pacer.beginSearch(maxWait: max(0, call.budget - call.waited), report: call.report, lane: lane)
         call.waited += ticket.waited
         call.sent += 1
         await call.report?(.started)
@@ -629,12 +689,12 @@ struct GroundedSearch: Sendable {
         let error = Self.failure(status: status, body: text, model: model)
         switch error {
         case .dailyLimit:
-            // Waiting won't help today: every search fails at once (no request sent) until the allowance resets.
-            await pacer.markDailyLimit()
+            // Waiting won't help today: every search with this key fails at once (no request sent) until it resets.
+            await pacer.markDailyLimit(lane: lane)
             throw error
         case .rateLimited(let after, _):
             let hold = after ?? Self.defaultHold
-            await pacer.coolDown(hold)
+            await pacer.coolDown(hold, lane: lane)
             // "limit: 0": this model has no free allowance at all, so waiting out the hold can't help.
             if Self.noAllowance(text) { throw error }
             throw GroundedRetry.hold(.rateLimited(retryAfter: hold, daily: false), seconds: hold)

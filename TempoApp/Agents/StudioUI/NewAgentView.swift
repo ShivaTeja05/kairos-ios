@@ -169,7 +169,7 @@ struct NewAgentView: View {
             ProgressView()
                 .controlSize(.large)
                 .tint(AgentUIStyle.green)
-            Text(agent.workingOn.map { $0 + "…" } ?? "Kairos is making your agent…")
+            Text(agent.workingOn.map { $0.hasSuffix("…") ? $0 : $0 + "…" } ?? "Kairos is making your agent…")
                 .font(AgentUIStyle.font(21, .medium))
                 .foregroundStyle(AgentUIStyle.soft)
                 .fixedSize(horizontal: false, vertical: true)

@@ -12,6 +12,7 @@ enum AgentDirectory {
             RoutinesAgent(),    // the person's saved routines ("do my morning"), made from their own words
             StudioAgent(),      // saved helper personas the person talks to: talk to one, ask one, save one
             ResearchAgent(),    // a research team: plans, searches Google side by side, writes a cited report
+            MemoryAgent(),      // remember / forget / what do you remember / what did we talk about
             PlannerAgent(),     // reminders, alarms, timers, calendar
             PeopleAgent(),      // find, call and message the person's people
             LetterAgent(),      // photo of a letter, bill or form → plain words + what to do

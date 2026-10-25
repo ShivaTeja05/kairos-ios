@@ -129,6 +129,96 @@ protocol SpecialistAgent: Sendable {
     var tools: [any KairosTool] { get }
 }
 
+/// Picks the specialists whose tools one request needs, from its words, so the model is sent a handful of tool
+/// declarations instead of all sixty (every request then costs far fewer of the free tier's tokens). It only narrows
+/// what is DECLARED: what the model may call is still everything on offer (Kairos checks calls against that), and
+/// when no clear word matches, every tool is declared. Kairos also keeps the helpers the last request used, and asks
+/// again with every tool when the model says it can't do something.
+enum ToolPicker {
+    /// Declared with every narrowed request (small): the way back from a helper, and stopping things.
+    static let core: Set<String> = ["back_to_kairos", "stop_agent", "revoke_permission"]
+
+    /// Specialist id → the words that call for it, matched on the folded words (lowercase, no accents, punctuation
+    /// as spaces: "o'clock" is "o clock"). A word ending in "*" matches any ending ("remind*": reminder, reminders);
+    /// anything else matches as whole words. A word starting with "~" is a weak hint ("tomorrow", "my son"): it adds
+    /// its helper only when a clear word matched too, so "Tell Priya I'll see her tomorrow" still gets every tool.
+    static let words: [String: [String]] = [
+        "planner": ["time", "times", "timer*", "alarm*", "remind*", "calendar*", "wake", "waking", "appointment*", "schedul*",
+                    "diary", "meeting*", "event*", "o clock", "~tomorrow", "~tonight", "~today", "~minute*", "~hour*", "~noon",
+                    "~midnight", "~next week", "~this week", "~birthday*", "~monday*", "~tuesday*", "~wednesday*",
+                    "~thursday*", "~friday*", "~saturday*", "~sunday*"],
+        "people": ["call", "calls", "calling", "called", "ring", "ringing", "phone him", "phone her", "phone them", "text",
+                   "texts", "texting", "texted", "message*", "contact*", "number for", "whatsapp", "sms", "email*", "tell my",
+                   "tell him", "tell her", "tell them", "let him know", "let her know", "let them know", "let my", "remember",
+                   "~mum", "~mom", "~mummy", "~mother", "~dad", "~daddy", "~father", "~son", "~daughter", "~wife", "~husband",
+                   "~partner", "~sister", "~brother", "~grandson", "~granddaughter", "~grandchild*", "~grandma", "~grandpa",
+                   "~granny", "~grandad", "~nan", "~nana", "~nephew", "~niece", "~aunt*", "~uncle", "~cousin*", "~friend*",
+                   "~neighbour*", "~neighbor*", "~carer", "~doctor", "~gp", "~who is"],
+        "letter": ["letter*", "bill", "bills", "form", "forms", "photo of", "picture of", "document*", "paperwork", "envelope*",
+                   "invoice*", "read this", "statement*", "~read it", "~council", "~hmrc", "~dvla", "~nhs", "~benefit*",
+                   "~pension*", "~tax"],
+        "scam": ["scam*", "fraud*", "is this real", "is it real", "is this genuine", "suspicious", "genuine", "legit*", "phishing",
+                 "spam", "too good to be true", "real or fake", "~fake", "~trust this", "~safe to"],
+        "money": ["pay", "pays", "paying", "paid", "payment*", "payee*", "money", "bank*", "transfer*", "pound", "pounds", "cash",
+                  "owe", "owed", "refund*", "direct debit", "standing order", "sort code", "~account*", "~afford", "~price*",
+                  "~cost*"],
+        "helpers": ["weather", "rain*", "umbrella", "temperature", "forecast", "sunny", "snow*", "wind", "windy", "frost*",
+                    "directions", "direction", "route", "how do i", "how can i", "how to", "shortcut*", "run my", "get to",
+                    "way to", "take me", "bus", "buses", "train*", "walk*", "drive", "driving", "map", "maps", "near me",
+                    "nearest", "setting*", "wifi", "wi fi", "bluetooth", "battery", "brightness", "louder", "quieter", "volume",
+                    "torch", "flashlight", "what time", "what day", "do not disturb", "font", "notification*", "~cold", "~hot",
+                    "~warm", "~wear", "~coat", "~where is", "~date", "~bigger", "~writing", "~bright"],
+        "workers": researchWords,
+        "research": researchWords,
+        "routines": ["routine*", "shortcut for", "do my", "every morning", "every evening", "every night", "every day", "save that",
+                     "save this", "bedtime", "run my"],
+        "operator": ["whatsapp", "screen", "instagram", "facebook", "uber", "youtube", "spotify", "netflix", "in the app",
+                     "~open", "~app", "~apps", "~tap", "~type", "~scroll", "~press", "~button"],
+        "photos": ["photo", "photos", "picture*", "pic", "pics", "selfie*", "camera", "post", "posting", "posted", "upload*",
+                   "instagram", "facebook", "~share", "~send it"],
+        "memory": ["remember*", "forget*", "forgot*", "note that", "keep in mind", "what did i tell", "what do you know",
+                   "about me", "what did we talk", "we talked", "talked about", "~do you know", "~yesterday", "~last time"],
+        "trust": ["permission*", "allow*", "trust*", "without asking", "stop everything", "stop all", "what have you done",
+                  "what did you do", "~activity", "~let it"],
+        "studio": ["helper*", "persona*", "talk to", "back to kairos", "~buddy", "~assistant*", "~character*", "~share", "~import*"],
+    ]
+
+    /// Workers and the research team answer to the same words.
+    static let researchWords = ["agent", "agents", "worker*", "research*", "find out", "read the paper", "paper", "papers",
+                                "arxiv", "look into", "look up", "investigat*", "report*", "search*", "~news", "~summar*",
+                                "~article*", "~website*", "~web", "~share"]
+
+    /// The specialists this table knows. A specialist it doesn't know (a new one) is always declared.
+    static var known: Set<String> { Set(words.keys) }
+
+    /// "at 7", "by 5": a time of day is a weak hint for the planner.
+    static let clockTime = #" (at|by|until|from|before|after|for) [0-9]"#
+
+    /// The specialist ids the words call for, or nil when no clear word matched (declare every tool).
+    /// `extra` adds clear words for a specialist: the names of the person's saved helpers call for the Studio, the
+    /// names they taught Kairos ("Priya is my daughter") for their people.
+    static func groups(for text: String, extra: [String: [String]] = [:]) -> Set<String>? {
+        let folded = " " + text.folded + " "
+        var strong = Set<String>(), weak = Set<String>()
+        for (id, list) in words {
+            for word in list where matches(word, in: folded) {
+                if word.hasPrefix("~") { weak.insert(id) } else { strong.insert(id); break }
+            }
+        }
+        for (id, names) in extra where names.contains(where: { !$0.folded.isEmpty && matches($0.folded, in: folded) }) {
+            strong.insert(id)
+        }
+        if folded.range(of: clockTime, options: .regularExpression) != nil { weak.insert("planner") }
+        return strong.isEmpty ? nil : strong.union(weak)
+    }
+
+    static func matches(_ word: String, in folded: String) -> Bool {
+        let word = word.hasPrefix("~") ? String(word.dropFirst()) : word
+        if word.hasSuffix("*") { return folded.contains(" " + word.dropLast()) }
+        return folded.contains(" " + word + " ")
+    }
+}
+
 extension String {
     /// Lowercased, accents folded, punctuation turned into spaces: for matching words and names.
     var folded: String {

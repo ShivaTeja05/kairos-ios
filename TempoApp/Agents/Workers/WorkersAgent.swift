@@ -486,6 +486,13 @@ enum WorkerWords {
             let list = jobs.prefix(3).map { WorkerJobWords(name: WorkerNaming.name(for: $0), goal: tidy($0)) }
             return .many(list)
         }
+        // "create 3 agents to compare phones": several agents for one job. Gemini decides how to split the work
+        // (spawn_agents), instead of the rules making a single worker.
+        let asked = text.lowercased().folded
+        if asked.range(of: #"\b(2|3|4|5|two|three|four|five|several|some|multiple|a few)( \w+)? (agents|workers)\b"#,
+                       options: .regularExpression) != nil {
+            return nil
+        }
         job = tidy(job)
         guard job.count >= 4 else { return .bare(name: given) }
         return .one(name: given.isEmpty ? WorkerNaming.name(for: job) : given, goal: job)
@@ -628,8 +635,8 @@ enum WorkerWords {
     }
 
     /// The Permissions helper's "stop everything" words: it takes back every permission AND stops every worker
-    /// (kairos.trust.stopEverything), so those words are left to it.
-    static let everythingPhrases = ["stop everything", "stop all my agents", "stop all agents"]
+    /// (kairos.trust.stopEverything), so those words are left to it. "Stop all my agents" only stops the workers.
+    static let everythingPhrases = ["stop everything"]
 
     /// "stop Paper Reader", "stop the paper reader agent", "stop the agents" → a name or "all".
     static func stopRequest(_ words: String) -> String? {

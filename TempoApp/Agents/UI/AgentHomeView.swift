@@ -35,6 +35,7 @@ struct AgentHomeView: View {
     @State private var showBoard = false
     @State private var boardRun: UUID?
     @State private var showSelfTest = false
+    @State private var showMemory = false
     /// Worker runs whose "is done" line was already said here.
     @State private var announced: Set<UUID> = []
     @ObservedObject private var library = AgentLibrary.shared
@@ -98,6 +99,11 @@ struct AgentHomeView: View {
         }
         .fullScreenCover(isPresented: $showReports) {
             ReportsView(onClose: { showReports = false }, onAsk: { AgentVoice.shared.ask($0) })
+                .overlay { PresentationOverlay() }
+                .overlay { confirmOverlay }
+        }
+        .fullScreenCover(isPresented: $showMemory) {
+            MemoryWindowView(onClose: { showMemory = false }, ask: { await AgentVoice.shared.askAndSpeak($0).say })
                 .overlay { PresentationOverlay() }
                 .overlay { confirmOverlay }
         }
@@ -238,6 +244,9 @@ struct AgentHomeView: View {
             Button { voice.stopAll(); showReports = true } label: {
                 Label("Reports", systemImage: "doc.text.magnifyingglass")
             }
+            Button { voice.stopAll(); showMemory = true } label: {
+                Label("Memory", systemImage: "brain.head.profile")
+            }
             Button { voice.stopAll(); showTrust = true } label: {
                 Label("Permissions", systemImage: "lock.shield.fill")
             }
@@ -259,7 +268,7 @@ struct AgentHomeView: View {
                 .background(.white, in: Capsule())
                 .foregroundStyle(AgentUIStyle.green)
         }
-        .accessibilityHint("The Agents board, saved helpers, reports, permissions, and Present Kairos")
+        .accessibilityHint("The Agents board, saved helpers, reports, memory, permissions, and Present Kairos")
     }
 
     /// Full sentence on an empty screen; one short line once the conversation needs the room.
@@ -417,7 +426,7 @@ struct AgentHomeView: View {
             ProgressView()
                 .controlSize(.large)
                 .tint(AgentUIStyle.green)
-            Text(agent.workingOn.map { $0 + "…" } ?? "Thinking…")
+            Text(agent.workingOn.map { $0.hasSuffix("…") ? $0 : $0 + "…" } ?? "Thinking…")
                 .font(AgentUIStyle.font(20, .medium))
                 .foregroundStyle(AgentUIStyle.soft)
                 .fixedSize(horizontal: false, vertical: true)
