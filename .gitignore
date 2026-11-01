@@ -1,2 +1,4 @@
-# macOS clutter. Each part keeps its own rules: kairos-ios/.gitignore and kairos-mesh/.gitignore.
+# macOS clutter and Python caches. Each part keeps its own rules: kairos-ios/.gitignore and kairos-mesh/.gitignore.
 .DS_Store
+__pycache__/
+*.pyc
