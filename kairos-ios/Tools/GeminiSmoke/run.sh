@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
 # Tests the iPhone agents' Gemini calls from this Mac with your real key, using the same Swift code as the app.
-# The key is read from tempo-hub/agents/.env (save it there first: copy the key in AI Studio, then run
-# tempo-hub/agents/set_gemini_key.sh). The key is never printed.
-# Usage: tempo-ios/Tools/GeminiSmoke/run.sh [model]     (default gemini-3.5-flash-lite)
+# The key comes from GEMINI_API_KEY, or else from tempo-hub/agents/.env in the folder that holds this repo (the OxHack
+# hub's key file). The key is never printed.
+# Usage: kairos-ios/Tools/GeminiSmoke/run.sh [model]     (default gemini-3.5-flash-lite)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-IOS="$(cd "$HERE/../.." && pwd)"
-ROOT="$(cd "$IOS/.." && pwd)"
+IOS="$(cd "$HERE/../.." && pwd)"         # kairos-ios/
+ROOT="$(cd "$IOS/../.." && pwd)"        # the folder that holds this repo (and tempo-hub/, if you have it)
 CORE="$IOS/TempoApp/Agents/Core"
 [ -d "$CORE" ] || CORE="$IOS/AgentsWIP/Core"
 # The research team's grounded search (check 5): merged into the app, or still in its work folder.
 GROUNDED="$IOS/TempoApp/Agents/Research/GroundedSearch.swift"
 [ -f "$GROUNDED" ] || GROUNDED="$IOS/AgentsWIP6/Research/GroundedSearch.swift"
 ENV_FILE="$ROOT/tempo-hub/agents/.env"
-key=""
-[ -f "$ENV_FILE" ] && key="$(grep -E '^GEMINI_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+key="${GEMINI_API_KEY:-}"
+[ -z "$key" ] && [ -f "$ENV_FILE" ] && key="$(grep -E '^GEMINI_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
 if [ -z "$key" ]; then
-  echo "No GEMINI_API_KEY in tempo-hub/agents/.env."
-  echo "Copy the key in Google AI Studio, run tempo-hub/agents/set_gemini_key.sh, then run this again."
+  echo "No Gemini key. Set GEMINI_API_KEY, or put GEMINI_API_KEY=... in tempo-hub/agents/.env beside this repo."
   exit 1
 fi
 OUT="${TMPDIR:-/tmp}/kairos-gemini-smoke"

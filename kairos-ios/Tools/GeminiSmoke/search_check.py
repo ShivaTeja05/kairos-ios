@@ -1,7 +1,8 @@
 """Why does Google Search (grounding) fail on this key? Tries one grounded request per model and prints Google's own
 reason: HTTP status, error status, quota metric/id and retry delay. Never prints the key.
 
-Run:  python3 -I tempo-ios/Tools/GeminiSmoke/search_check.py   (reads GEMINI_API_KEY from tempo-hub/agents/.env)
+Run:  python3 -I kairos-ios/Tools/GeminiSmoke/search_check.py   (GEMINI_API_KEY, or else tempo-hub/agents/.env beside
+      this repo)
 """
 import json
 import os
@@ -10,19 +11,22 @@ import time
 import urllib.error
 import urllib.request
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+# The folder that holds this repo: kairos-ios/Tools/GeminiSmoke -> up four.
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 ENV = os.path.join(ROOT, "tempo-hub", "agents", ".env")
 MODELS = sys.argv[1:] or ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash"]
 
 
 def key_from_env():
+    if os.environ.get("GEMINI_API_KEY"):
+        return os.environ["GEMINI_API_KEY"].strip()
     try:
         for line in open(ENV, encoding="utf-8"):
             if line.startswith("GEMINI_API_KEY="):
                 return line.split("=", 1)[1].strip()
     except OSError:
         pass
-    sys.exit("No GEMINI_API_KEY in tempo-hub/agents/.env (run tempo-hub/agents/set_gemini_key.sh first).")
+    sys.exit("No Gemini key. Set GEMINI_API_KEY, or put GEMINI_API_KEY=... in tempo-hub/agents/.env beside this repo.")
 
 
 def call(model, key, body):
