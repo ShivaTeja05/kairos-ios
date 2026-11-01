@@ -52,6 +52,10 @@ struct GroundedAnswer: Sendable, Equatable {
     var model: String = ""
     /// Set when the chosen model couldn't search the web and `model` stood in for it: the chosen model's name.
     var fallbackFrom: String? = nil
+
+    /// Google backed the answer with at least one real web page (a grounding chunk with a link). Without one the
+    /// answer is only the model's own words: it isn't a search that found anything, and it is never used as one.
+    var grounded: Bool { !sources.isEmpty }
 }
 
 /// What can go wrong while researching, in plain words for the person (spoken).
@@ -100,6 +104,15 @@ enum ResearchError: LocalizedError, Equatable {
     var isSearchLimit: Bool {
         switch self {
         case .rateLimited, .busy, .dailyLimit: return true
+        default: return false
+        }
+    }
+
+    /// Google itself refused (a 429, or today's allowance is used up). Our own turn-taking (`.busy`) is not Google's
+    /// limit, so it is never blamed on Google or counted against a job as one.
+    var isGoogleLimit: Bool {
+        switch self {
+        case .rateLimited, .dailyLimit: return true
         default: return false
         }
     }
@@ -783,13 +796,8 @@ struct GroundedSearch: Sendable {
             numberForChunk[i] = number
             numberForURL[uri] = number
         }
-        // Google searched but sent back no links (seen with gemini-2.5-flash on the free tier): the search itself is
-        // the source, so the answer isn't mistaken for the model's own general knowledge.
-        if sources.isEmpty, let query = queries.first,
-           let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
-            sources.append(ResearchSource(number: 1, title: "Google Search: \(String(query.prefix(100)))",
-                                          url: "https://www.google.com/search?q=\(encoded)"))
-        }
+        // No links came back (seen with gemini-2.5-flash on the free tier): no source is made up for it. The answer
+        // is then not `grounded`, and callers treat it as a search that found nothing.
 
         // Where each supported segment ends → the source numbers backing it.
         var marks: [Int: [Int: [Int]]] = [:]  // part index → byte end → numbers

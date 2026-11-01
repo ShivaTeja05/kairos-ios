@@ -19,8 +19,8 @@ struct PeopleAgent: SpecialistAgent {
         them to tap Call). message_contact opens Messages, or WhatsApp if they ask for it, with the note ready; they \
         tap Send themselves. Write the note as they would send it: first person, their own words, nothing added. If \
         they haven't said what it should say, ask. Only put digits in "number" when the person said that number to \
-        you themselves. When they tell you who someone is ("Priya is my daughter"), call remember_relation. For an \
-        emergency, tell them to ring 999 themselves.
+        you themselves. When they tell you who someone is ("Priya is my daughter"), call remember_relation. In an \
+        emergency (someone hurt, not breathing, a fire) always say: ring 999 yourself now. Never give any other number.
         """
     }
 
@@ -60,6 +60,7 @@ extension PeopleAgent {
                 access = PeopleAccess.current
             }
             guard access.canRead else { return await PeopleAgent.accessResult(access, ctx) }
+            PeopleAgent.RecentPerson.shared.remember(said)
 
             switch PeopleDirectory.shared.find(said) {
             case .none:
@@ -279,7 +280,7 @@ extension PeopleAgent {
     /// always shows what will really be dialled or opened.
     static func plan(_ args: JSONValue, _ ctx: TurnContext, for purpose: Purpose) -> Plan {
         var number = args.text("number")
-        var name = args.text("contact_name")
+        var name = resolvingPronoun(args).text("contact_name")
         if number == nil, let given = name, looksLikeNumber(given) { number = given; name = nil }
         if let number { return planNumber(number, ctx, purpose) }
         guard let name else {
@@ -411,8 +412,165 @@ extension PeopleAgent {
     static let emergencyNumbers: Set<String> = ["999", "112", "911"]
     static let emergencyPhrases: Set<String> = ["999", "112", "911", "emergency", "emergency services", "ambulance",
                                                 "fire brigade", "fire service", "coastguard"]
-    static let emergencyAdvice = "For an emergency, please ring 999 yourself straight away. Open the Phone app, tap Keypad, press 9 9 9, then the green button."
-    static let policeAdvice = "If it's an emergency, please ring 999 yourself straight away. If it isn't urgent, shall I ring 101, the police non-emergency number?"
+    /// Said at once, by code, with no tool and no model: a model once gave a number that doesn't work in the UK.
+    /// Away from the UK (PeopleDirectory.usesUKServices is false) it says 112, which works from a mobile almost everywhere.
+    static var emergencyAdvice: String { emergencyAdvice(inUK: PeopleDirectory.usesUKServices) }
+    static func emergencyAdvice(inUK: Bool) -> String {
+        let number = inUK ? "999" : "112"
+        return "Please ring \(number) yourself now. Don't wait for me: I can't make that call for you. "
+            + "Open the Phone app, tap Keypad, press \(number.map(String.init).joined(separator: " ")), then the green "
+            + "button. Tell them where you are, what has happened, and whether the person is awake and breathing. "
+            + "Stay on the line and do what they say. "
+            + (inUK ? "Use 999, never any other number."
+                    : "112 works from a mobile in most countries. If you know the local emergency number, that works too.")
+    }
+
+    /// "Ring an ambulance", "call 999", "he isn't breathing", "she's collapsed": an emergency happening now.
+    /// Kairos answers these with emergencyAdvice before anything else. Kept narrow on purpose: a past event
+    /// ("he had a heart attack last year"), a reminder, a payment of £999, or "the ambulance is on its way" is not one.
+    static func isEmergency(_ words: String) -> Bool {
+        let t = " " + words.folded + " "
+        guard t.count > 2 else { return false }
+        func has(_ pattern: String) -> Bool { t.range(of: pattern, options: .regularExpression) != nil }
+        func hasAny(_ phrases: [String]) -> Bool { phrases.contains { t.contains($0) } }
+        // A weaker sign counts only when the nearest words before it name a person, not a device, an app or a pet
+        // ("my phone won't wake up", "WhatsApp is unresponsive", "the cat passed out").
+        func aboutAPerson(_ pattern: String) -> Bool {
+            guard let rx = try? NSRegularExpression(pattern: pattern) else { return false }
+            let ns = t as NSString
+            return rx.matches(in: t, range: NSRange(location: 0, length: ns.length)).contains { m in
+                for w in ns.substring(to: m.range.location).split(separator: " ").suffix(4).reversed() {
+                    if personWords.contains(String(w)) || w == "and" || w == "but" { return true }
+                    if notAPerson.contains(String(w)) { return false }
+                }
+                return true
+            }
+        }
+        // Already handled, or not an emergency by their own words.
+        if has(#" (?:don t|do not|doesn t|does not|won t) need (?:an |the )?(?:ambulance|paramedics?|999) "#)
+            || has(#" (?:no need for|not|isn t|is not) (?:an |a )?(?:ambulance|emergency) "#)
+            || has(#" ambulance (?:is |s )?(?:on (?:its|the) way|coming|here|already) "#)
+            || has(#" (?:already|i ve|i have|we ve|we have) (?:already )?(?:called|rang|rung|phoned|dialled|dialed) (?:999|112|911|an ambulance|the ambulance|for an ambulance|the paramedics) "#)
+            || has(#" paramedics (?:are )?(?:here|on (?:their|the) way|coming) "#) {
+            return false
+        }
+        // Someone asking for the emergency services. Digits only straight after a calling verb ("send £999" is money).
+        let service = has(#" (?:call|ring|phone|dial|get|need|send|fetch)(?: (?:me|us|him|her|them|for|an|a|the|please|out|up|now|quick|quickly))* (?:ambulance|paramedics?|fire brigade|fire service|fire engine|emergency services|coastguard) "#)
+            || has(#" (?:call|ring|phone|dial)(?: (?:on|up|me|us|for|please))* (?:999|112|911|triple nine|nine nine nine|nine one one) "#)
+            // "Call the police, someone's breaking in"; not the non-emergency line, a police station or a report.
+            || (has(#" (?:call|ring|phone|get|need|send|fetch)(?: (?:me|us|for|the|please|now|quick|quickly))* (?:police|cops) "#)
+                && !has(#" (?:police (?:station|officer|liaison|community)|non emergency|not urgent|isn t urgent|101|about|report|reporting|later|tomorrow) |^ (?:should|do|can|could|would|shall) (?:i|we) "#))
+            // Just the word: "Ambulance!", "Emergency, please", "It's an emergency", "Help, fire!".
+            || has(#"^ (?:(?:help|please|quick|quickly|hurry|kairos|hey|oh|god|it s|its|it is|this is|there s|there is|we have|i have|we ve got|i ve got|an?) )*(?:ambulance|emergency|emergency services|medical emergency|fire)(?: (?:help|please|quick|quickly|now|hurry|me|us|fire|emergency))* $"#)
+            || otherLanguageCall(t)
+        // Someone in danger right now.
+        let distress = has(#" (?:not|stopped|isn t|is not|wasn t|can t|cannot|can not|struggling to|fighting to) breath(?:e|ing)? "#)
+            || has(#" (?:unconscious(?! bias)|choking) "#)
+            || has(#" having (?:a )?(?:heart attack|stroke|seizure) "#)
+            || has(#" (?:is|s|are|re) on fire | there s a fire | there is a fire "#)
+            || has(#" (?:bleeding (?:heavily|badly|a lot)|won t stop bleeding|can t stop (?:the )?bleeding|blood everywhere|losing (?:a lot of )?blood) "#)
+            || has(#" (?:someone|somebody|someone s|somebody s|there s someone|there is someone) (?:is |s )?(?:breaking|trying to break|trying to get) in(?:to)? "#)
+            || hasAny(otherLanguageDistress)
+        // Weaker signs that also fit a heavy sleeper, a frozen phone or the past: someone else not waking ("I'm not
+        // waking up early" is about an alarm), not responding, not moving, fainted, passed out, chest pains, a stroke
+        // or a fit. Not when a device or pet is named just before, nor with an alarm, a habit or a past time.
+        let weak = aboutAPerson(#"(?<! i)(?<! i m)(?<! i am)(?<! i ll)(?<! i will)(?<! we)(?<! we re)(?<! we ll)(?<! it)(?<! it s) (?:not|isn t|is not|won t|wont|will not) wak(?:e|ing) up "#)
+            || aboutAPerson(#" (?:can t|cannot|can not) (?:wake|rouse) (?:him|her|them) "#)
+            || aboutAPerson(#" unresponsive "#)
+            || (aboutAPerson(#"(?<! it)(?<! it s)(?<! it is) (?:not|isn t|is not|stopped|has stopped) responding (?!to (?:my|the|our|his|her|your|any|messages?|texts?|calls?|emails?|whatsapps?|letters?|treatment|medication) )"#)
+                && !has(#" (?:phone|phones|calls?|called|ringing|rang|rung|texts?|texted|messages?|messaged|emails?|whatsapp|picking up|answering|replying|replied) "#))
+            || (aboutAPerson(#" (?:not|isn t|is not|stopped|has stopped) moving (?!(?:to|into|in|out|house|home|away|back|forward|on|abroad|over|up|down|until|till|next|this|that|flat|jobs?|schools?|the|her|his|their|my|our|it|them|any|anything|fast|quickly|much|very|around|round|about|along|yet|for|from|with|because|so|since) )"#)
+                && personWords.contains { t.contains(" \($0) ") })
+            || aboutAPerson(#"(?<! i)(?<! nearly)(?<! almost)(?<! could have)(?<! could ve) fainted "#)
+            || aboutAPerson(#"(?<! i)(?<! we)(?<! nearly)(?<! almost) passed out (?!(?:the|a|an|some|all|these|those|leaflets|flyers|invitations|cards|papers|sweets|copies|food|drinks|programmes|forms|tickets|it|them|my|his|her|our|their|your|of) )"#)
+            || has(#" (?:s|has|have|ve) (?:just )?had (?:a )?(?:stroke|heart attack|seizure|fit) (?!of )"#)
+            || has(#" having (?:a )?fit (?!(?:about|over|because|when|if|of) )"#)
+            || (has(#" (?:fallen|fell|had a fall) "#) && has(#" (?:can t|cannot|can not) get (?:up|him up|her up|them up) "#))
+            || (has(#" chest pains? "#) && !has(#"^ (?:what|why|how|does|do|is|are|can|could|should|which|when|tell me about|search|look up|google|find|read me) | about (?:my |his |her |the )?chest pains? "#))
+        let habitOrPast = has(#" (?:remind|reminder|alarm|alarms|timer|calendar|diary|appointment|schedule|wake me|wake us|for school|for work|for college|in the mornings?|mornings|every|early|on time|in time|on (?:his|her|their|my|our) own|otherwise) "#)
+            || has(#" (?:yesterday|last (?:week|month|year|time|night|weekend)|years? ago|months? ago|weeks? ago|days? ago|in the past|in (?:19|20)\d\d|used to|in (?:the )?hospital|at the hospital|recovering|recovered|(?:has|have|s) gone|went away|gone away|eased off|better now) "#)
+        // "Collapsed" counts only when nothing says it was in the past.
+        let collapsed = has(#" collapsed "#)
+            && !has(#" (?:yesterday|last (?:week|month|year|time)|years? ago|months? ago|weeks? ago|days? ago|in the past) "#)
+        // A reminder or appointment about it is the planner's job ("remind me to ring the ambulance service").
+        if !distress, has(#" (?:remind|reminder|alarm|timer|calendar|diary|appointment|schedule) "#) { return false }
+        return service || distress || collapsed || (weak && !habitOrPast)
+    }
+
+    /// Any emergency word at all, in any language Kairos speaks: wider than isEmergency, for a backstop line on a
+    /// reply made with no model ("Your Mac isn't answering…" plus emergencyAdvice), never for a whole answer.
+    static func mentionsEmergency(_ words: String) -> Bool {
+        let t = " " + words.folded + " "
+        return [emergencyWords, otherLanguageHelp, otherLanguageAlone, otherLanguageDistress].contains { list in
+            list.contains { t.contains($0) }
+        }
+    }
+    private static let emergencyWords = foldedPhrases([
+        "ambulance", "paramedic", "paramedics", "999", "112", "911", "triple nine", "nine nine nine", "emergency",
+        "breathing", "breathe", "collapsed", "unconscious", "unresponsive", "bleeding", "fire", "police", "choking",
+        "stroke", "heart attack", "seizure", "fainted", "passed out", "chest pain", "chest pains",
+        "बेहोश", "सांस", "साँस", "بے ہوش", "بیہوش", "سانس", "anadlu", "anymwybodol", "oddycha", "nieprzytomny",
+        "nieprzytomna",
+    ])
+
+    /// Who a weaker sign is about: a person ("he won't wake up"), or not one ("my phone won't wake up").
+    private static let personWords: Set<String> = [
+        "he", "she", "him", "her", "they", "them", "husband", "wife", "mum", "mom", "mother", "dad", "father", "son",
+        "daughter", "grandson", "granddaughter", "gran", "granny", "grandma", "grandad", "grandpa", "nan", "nana", "baby",
+        "child", "kid", "boy", "girl", "man", "woman", "someone", "somebody", "partner", "brother", "sister", "friend",
+        "neighbour", "kids", "children", "grandchildren", "grandkids",
+    ]
+    private static let notAPerson: Set<String> = [
+        "phone", "phones", "iphone", "ipad", "mac", "macbook", "imac", "laptop", "computer", "pc", "screen", "display",
+        "monitor", "app", "apps", "whatsapp", "tablet", "watch", "tv", "telly", "television", "kindle", "alexa", "echo",
+        "printer", "router", "wifi", "internet", "broadband", "website", "browser", "email", "car", "engine", "battery",
+        "mouse", "keyboard", "game", "siri", "kairos", "cat", "dog", "puppy", "kitten", "rabbit", "hamster", "budgie",
+        "bird", "fish", "pet", "queue", "traffic", "train", "bus", "you", "your",
+    ]
+
+    // The other languages Kairos speaks: Hindi, Urdu, Welsh and Polish in full, and "ambulance" in the rest.
+    // Compared after folding, the same as the words, so "karetkę" and "karetke" match.
+    private static func foldedPhrases(_ list: [String]) -> [String] { list.map { " " + $0.folded + " " } }
+    private static let otherLanguageDistress = foldedPhrases([
+        "सांस नहीं ले रहा", "सांस नहीं ले रही", "साँस नहीं ले रहा", "साँस नहीं ले रही", "सांस नहीं आ रही", "साँस नहीं आ रही",
+        "बेहोश हो गया", "बेहोश हो गई", "बेहोश हो गए", "बेहोश है", "आग लग गई", "आग लगी है", "दिल का दौरा पड़ा",
+        "saans nahi le raha", "saans nahi le rahi", "saans nahin le raha", "saans nahin le rahi", "behosh ho gaya",
+        "behosh ho gayi", "behosh hai",
+        "سانس نہیں لے رہا", "سانس نہیں لے رہی", "بے ہوش ہو گیا", "بے ہوش ہو گئی", "بیہوش ہو گیا", "بیہوش ہو گئی", "بے ہوش ہے",
+        "آگ لگ گئی", "دل کا دورہ پڑا",
+        "ddim yn anadlu", "dim yn anadlu", "wedi llewygu", "yn anymwybodol", "mae tân", "ar dân",
+        "nie oddycha", "stracił przytomność", "straciła przytomność", "jest nieprzytomny", "jest nieprzytomna",
+        "zemdlał", "zemdlała", "ma zawał", "ma udar", "jest pożar", "mamy pożar",
+    ])
+    private static let otherLanguageHelp = foldedPhrases([
+        "ambulance", "एम्बुलेंस", "एंबुलेंस", "ایمبولینس", "ایمبولنس", "ambiwlans", "karetka", "karetkę", "karetki",
+        "pogotowie", "999", "112", "911", "पुलिस", "پولیس", "heddlu", "policję", "policja",
+    ])
+    private static let otherLanguageCallVerbs = foldedPhrases([
+        "bulao", "bulaiye", "bula", "बुलाओ", "बुलाइए", "बुलाइये", "बुलाएं", "बुलाएँ", "बुला", "بلاؤ", "بلائیں", "بلا", "بلائے",
+        "ffoniwch", "ffonia", "galwch", "zadzwoń", "zadzwońcie", "wezwij", "wezwijcie", "dzwoń", "dzwońcie",
+    ])
+    private static let otherLanguageAlone = foldedPhrases([
+        "एम्बुलेंस", "एंबुलेंस", "इमरजेंसी", "आपातकाल", "आग", "ایمبولینس", "ایمبولنس", "ایمرجنسی", "آگ", "ambiwlans",
+        "argyfwng", "karetka", "karetkę", "pogotowie", "pożar", "అంబులెన్స్", "ஆம்புலன்ஸ்", "অ্যাম্বুলেন্স", "ਐਂਬੂਲੈਂਸ",
+        "એમ્બ્યુલન્સ",
+    ])
+    private static let otherLanguageFiller = Set(["please", "help", "jaldi", "se", "जल्दी", "جلدی", "proszę", "szybko", "plis"].map(\.folded))
+    private static let otherLanguageDont = foldedPhrases(["मत", "مت", "paid", "peidiwch", "nie dzwoń", "nie wzywaj"])
+
+    /// "एम्बुलेंस बुलाओ", "Zadzwoń po karetkę", "Ffoniwch ambiwlans", or just "Karetka!".
+    private static func otherLanguageCall(_ t: String) -> Bool {
+        let alone = t.split(separator: " ").filter { !otherLanguageFiller.contains(String($0)) }.joined(separator: " ")
+        if otherLanguageAlone.contains(" \(alone) ") { return true }
+        return otherLanguageHelp.contains { t.contains($0) } && otherLanguageCallVerbs.contains { t.contains($0) }
+            && !otherLanguageDont.contains { t.contains($0) }
+    }
+
+    static var policeAdvice: String {
+        PeopleDirectory.usesUKServices
+            ? "If it's an emergency, please ring 999 yourself straight away. If it isn't urgent, shall I ring 101, the police non-emergency number?"
+            : "If it's an emergency, please ring 112 yourself straight away, or the local police number."
+    }
 
     /// Fixed UK public numbers, safe to ring whoever suggested them (the scam helper offers 159).
     struct Service: Sendable {
@@ -431,8 +589,12 @@ extension PeopleAgent {
             Service(number: "105", title: "105, the power cut line", names: ["105", "power cut", "power cut line"]),
         ]
 
-        static func named(_ phrase: String) -> Service? { PeopleDirectory.isUK ? all.first { $0.names.contains(phrase) } : nil }
-        static func numbered(_ digits: String) -> Service? { PeopleDirectory.isUK ? all.first { $0.number == digits } : nil }
+        static func named(_ phrase: String) -> Service? {
+            PeopleDirectory.usesUKServices ? all.first { $0.names.contains(phrase) } : nil
+        }
+        static func numbered(_ digits: String) -> Service? {
+            PeopleDirectory.usesUKServices ? all.first { $0.number == digits } : nil
+        }
     }
 
     // MARK: Messages
@@ -608,8 +770,41 @@ extension PeopleAgent {
         guard let args = callParts(words) else { return nil }
         switch plan(args, ctx, for: .call) {
         case .ready, .refuse: return args   // .refuse: "call 999" gets the advice at once, offline
-        case .ask, .needsAccess: return nil
+        // "Ring her then", just after "Is my sister Lakshmi in my contacts?": code knows who, so it rings her or
+        // says plainly why it can't ("I couldn't find Lakshmi…"), instead of the model asking for the name again.
+        case .ask: return resolvingPronoun(args) != args ? args : nil
+        case .needsAccess: return nil
         }
+    }
+
+    /// The person this conversation is about, from the last contact look-up ("Is my sister Lakshmi in my contacts?"),
+    /// so "ring her then" knows who. Forgotten with the conversation, and after 15 minutes.
+    final class RecentPerson: @unchecked Sendable {
+        static let shared = RecentPerson()
+        private let lock = NSLock()
+        private var said: (name: String, at: Date)?
+
+        var name: String? {
+            lock.lock(); defer { lock.unlock() }
+            guard let said, Date().timeIntervalSince(said.at) < 15 * 60 else { return nil }
+            return said.name
+        }
+        func remember(_ name: String) {
+            guard !PeopleAgent.pronouns.contains(name.folded) else { return }
+            lock.lock(); said = (name, Date()); lock.unlock()
+        }
+        func forget() { lock.lock(); said = nil; lock.unlock() }
+    }
+
+    static let pronouns: Set<String> = ["her", "him", "them"]
+
+    /// call_contact / message_contact arguments with "her" / "him" / "them" swapped for the person this conversation
+    /// is about. Unchanged when there's no such person (Kairos then asks who).
+    static func resolvingPronoun(_ args: JSONValue) -> JSONValue {
+        guard let said = args.text("contact_name"), pronouns.contains(said.folded),
+              let person = RecentPerson.shared.name, case .object(var fields) = args else { return args }
+        fields["contact_name"] = .string(person)
+        return .object(fields)
     }
 
     /// The words after "call" / "ring" / "phone", as call_contact arguments. Parsing only.
@@ -622,7 +817,7 @@ extension PeopleAgent {
         guard let v = t.firstIndex(where: verbs.contains), v <= 6, t[..<v].allSatisfy(lead.contains) else { return nil }
         var rest = Array(t[(v + 1)...])
         let edge: Set<String> = ["please", "now", "for", "me", "thanks", "thank", "you", "up", "straight", "away", "right",
-                                 "kairos", "quickly"]
+                                 "kairos", "quickly", "then"]
         while rest.first == "up" { rest.removeFirst() }
         while let last = rest.last, edge.contains(last) { rest.removeLast() }
         guard !rest.isEmpty, rest.count <= 5 else { return nil }

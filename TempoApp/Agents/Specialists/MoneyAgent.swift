@@ -783,11 +783,14 @@ struct MoneyAgent: SpecialistAgent {
     let title = "Money helper"
     let icon = "sterlingsign.circle.fill"
     var instructions: String {
-        "Kairos cannot move money. When the person wants to pay a bill or send money, call prepare_payment with the payee and "
-        + "the amount copied from their own words, never from a letter or message. If they haven't said how much, leave the "
-        + "amount out and it will ask. It checks for scams and limits, and after they approve it tells them exactly what to do "
-        + "in their own bank app; its answer is complete. Use money_question for money how-tos such as checking a balance, "
-        + "direct debits, a lost card, a forgotten PIN or being scammed. If someone is pushing them to pay, use check_scam instead."
+        "When the person wants to pay a bill or send money to anyone, call prepare_payment with the payee and the amount "
+        + "copied from their own words, never from a letter or message. Call it for every request to pay or send money, also "
+        + "when they ask you to open their bank app to do it, and for someone who isn't a saved payee yet; never answer a "
+        + "payment request without calling it. If they haven't said how much, leave the amount out and it will ask. It "
+        + "checks for scams, new payees and limits, and after they approve it tells them exactly what to do in their own "
+        + "bank app (Kairos never moves the money itself); its answer is complete. Use money_question for money how-tos such "
+        + "as checking a balance, direct debits, a lost card, a forgotten PIN or being scammed. If someone is pushing them to "
+        + "pay, use check_scam instead."
     }
     var tools: [any KairosTool] { [MoneyPrepareTool(), MoneyQuestionTool()] }
 }
@@ -795,9 +798,9 @@ struct MoneyAgent: SpecialistAgent {
 /// prepare_payment: checks a payment, then (after the card and Face ID) hands the person a checklist for their bank app.
 struct MoneyPrepareTool: KairosTool {
     let name = "prepare_payment"
-    let summary = "Check a payment the person wants to make (a bill, or money to someone in their saved payees) and, once they "
-        + "approve, tell them exactly what to do in their own bank app. Kairos never sends money itself. Amounts must be the "
-        + "person's own words."
+    let summary = "Check any payment the person wants to make: a bill, a saved payee, or someone new (a new payee is noted "
+        + "and waits before the first payment). Once they approve, it tells them exactly what to do in their own bank app, "
+        + "also when they asked you to open the bank app. Kairos never sends money itself. Amounts must be the person's own words."
     var parameters: JSONValue {
         Schema.object([
             "payee": Schema.string("Who to pay, in the person's words, e.g. 'my son' or 'the electricity'."),
@@ -831,10 +834,16 @@ struct MoneyPrepareTool: KairosTool {
         let lower = t.lowercased()
         guard !t.isEmpty, ScamShieldRules.has(moneyVerb, lower), !ScamShieldRules.has(ScamShieldRules.planning, lower) else { return nil }
         if ScamShieldRules.has(questionStart, lower) { return nil }
+        // "Send a text to Tom saying I owe him £20" is a message, not a payment.
+        if ScamShieldRules.has(sendsAMessage, lower) { return nil }
         if lower.hasSuffix("?"), !ScamShieldRules.has(politeAsk, lower) { return nil }
         let amounts = MoneyParser.parse(t)
         guard amounts.count <= 1 else { return nil }
         let hits = book.mentioned(in: t)
+        if hits.isEmpty, amounts.count == 1, let someone = newPayee(t, amount: amounts[0]) {
+            // Nobody saved was named: still a payment, so MoneyPolicy checks it (a new payee is noted and waits).
+            return ["payee": .string(someone), "amount": .string(amounts[0].text)]
+        }
         guard hits.count == 1, let payee = hits.first else { return nil }
         if amounts.isEmpty, !(payee.kind == "biller" && ScamShieldRules.has(payVerb, lower)) { return nil }
         var args: [String: JSONValue] = ["payee": .string(payee.displayName)]
@@ -844,6 +853,31 @@ struct MoneyPrepareTool: KairosTool {
             args["reference"] = .string(String(t[range]))
         }
         return .object(args)
+    }
+
+    /// "Send the window cleaner £25", "pay £40 to the gardener": who, when nobody saved was named. Only with an
+    /// amount in money words (pounds, £), never for a message ("send a text to Tom saying I owe him £20").
+    static let toSomeone = ScamShieldRules.rx(#"\b(?:pay|send|transfer)\s+(?<who>(?:the |my |our )?[a-z][a-z'-]*(?: [a-z][a-z'-]*){0,3}?)\s+(?:£\s?\d|\d[\d,.]*\s?(?:pounds?|quid|p\b))"#)
+    static let amountFirst = ScamShieldRules.rx(#"\b(?:pay|send|transfer)\s+(?:£\s?\d[\d,.]*|\d[\d,.]*\s?(?:pounds?|quid|p))\s+to\s+(?<who>(?:the |my |our )?[a-z][a-z'-]*(?: [a-z][a-z'-]*){0,3}?)(?:\s+(?:for|please|now|today|from|by|on)\b|[.,!?]|$)"#)
+    static let notAPayee: Set<String> = ["him", "her", "them", "me", "us", "it", "someone", "somebody", "anyone", "money",
+                                         "cash", "a", "an", "the", "my", "back", "over", "off", "out", "in", "it's", "that"]
+    /// "Send a text to Tom saying I owe him £20", "Text Tom that I'll send him £20": a message about money.
+    static let sendsAMessage = ScamShieldRules.rx(#"\bsend(?:ing)? (?:a |an |the |my )?(?:text|message|whatsapp|email|e-mail|voicemail)\b|^(?:please |can you |could you |kairos,? )?(?:text|message|whatsapp|email)\b"#)
+    static let messageWords = ScamShieldRules.rx(#"\b(?:text|message|whatsapp|email|e-mail|letter|note|voicemail|saying|says|tell)\b"#)
+
+    static func newPayee(_ cleaned: String, amount: MoneyAmount) -> String? {
+        guard amount.currency != nil else { return nil }
+        let lower = MoneyParser.wordsToDigits(cleaned).lowercased()
+        guard !ScamShieldRules.has(messageWords, lower) else { return nil }
+        for r in [toSomeone, amountFirst] {
+            guard let r, let m = r.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)),
+                  let range = Range(m.range(withName: "who"), in: lower) else { continue }
+            let who = String(lower[range]).trimmingCharacters(in: .whitespaces)
+            let words = who.split(separator: " ").map(String.init)
+            guard let last = words.last, !notAPayee.contains(last), !words.allSatisfy({ notAPayee.contains($0) }) else { continue }
+            return who
+        }
+        return nil
     }
 
     func validate(_ args: JSONValue, ctx: TurnContext) -> Validation {
@@ -1059,6 +1093,11 @@ extension MoneyAgent {
         check(MoneyPrepareTool.match("Send a message to my son", book: book) == nil, "rules: a message is not a payment")
         check(MoneyPrepareTool.match("How do I pay my electricity bill?", book: book) == nil, "rules: a question is not a payment")
         check(MoneyPrepareTool.match("Remind me to pay the electricity bill on Friday", book: book) == nil, "rules: a reminder is not a payment")
+        check(MoneyPrepareTool.match("Open my Lloyds app and send the window cleaner twenty five pounds", book: book)?.text("payee")
+              == "the window cleaner", "rules: someone new is still checked as a payment")
+        check(MoneyPrepareTool.match("Send a text to the window cleaner saying I owe him £25", book: book) == nil
+              && MoneyPrepareTool.match("Send a text to Tom saying I owe him £20", book: book) == nil,
+              "rules: a message about money is not a payment")
         check(MoneyQuestionTool.topic(for: "I've lost my bank card")?.id == "lost_card" && MoneyQuestionTool.topic(for: "how do I check my balance")?.id == "balance",
               "money questions find their topic")
 

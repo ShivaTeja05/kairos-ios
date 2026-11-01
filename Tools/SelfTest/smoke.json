@@ -1,0 +1,52 @@
+{
+ "cases": [
+  {
+   "id": "smoke-alarm",
+   "category": "time",
+   "words": "Set an alarm for 7 tomorrow morning",
+   "expectAny": [
+    "set_alarm"
+   ],
+   "forbid": [
+    "create_reminder"
+   ],
+   "expectArgs": {
+    "set_alarm": "07:00"
+   }
+  },
+  {
+   "id": "smoke-calendar-live",
+   "category": "time",
+   "words": "What's on my calendar tomorrow?",
+   "expectAny": [
+    "get_calendar_events"
+   ],
+   "live": true,
+   "expectSay": [
+    "calendar",
+    "nothing",
+    "free",
+    "event",
+    "tomorrow"
+   ]
+  },
+  {
+   "id": "smoke-siri-reminder",
+   "category": "time",
+   "words": "Remind me to take my tablets at 9 tonight",
+   "expectAny": [
+    "create_reminder"
+   ],
+   "source": "siriBackground"
+  },
+  {
+   "id": "smoke-chain",
+   "category": "chains",
+   "words": "What's the weather tomorrow in Oxford, and set an alarm for 7",
+   "expectAll": [
+    "get_weather",
+    "set_alarm"
+   ]
+  }
+ ]
+}

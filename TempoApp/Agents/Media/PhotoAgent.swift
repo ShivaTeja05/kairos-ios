@@ -24,7 +24,10 @@ struct PhotoAgent: SpecialistAgent {
     var instructions: String {
         "Use take_photo when the person wants a NEW photo taken for something (\"take a picture and post it to my "
             + "Instagram story\", \"take a selfie and send it to Mum on WhatsApp\"); pass their whole request as the purpose. "
-            + "It opens the camera and the photo arrives in the next message, so stop after it. "
+            + "It opens the camera and the photo arrives in the next message, so make no more photo calls after it; but in "
+            + "the same step also call any other tool the request asks for (for example allow_without_asking when they say "
+            + "you needn't ask before posting). take_photo, share_photo and save_photo are only for a NEW photo or the one "
+            + "just taken: to find, post or send a photo already in their Photos or gallery, use operate_app with app Photos. "
             + "When a message starts \"Here's the photo for:\", the photo is ready: do what those words say, usually with "
             + "share_photo or save_photo, and never call take_photo again. "
             + "Use share_photo to post, send or upload the photo to any app: an Instagram story or post, a WhatsApp chat "
@@ -222,7 +225,8 @@ struct PhotoShareTool: KairosTool {
     let summary = "Puts the photo the person just took on any app: an Instagram story or post, a WhatsApp chat or "
         + "Status, Facebook, X, Google Drive, a Google Photos link, an email, or another app they name. It saves the "
         + "photo to Photos first, then the phone operator does the taps; the owner approves the final Post or Send. "
-        + "If there's no photo yet, it opens the camera first."
+        + "If there's no photo yet, it opens the camera first. Not for a photo already in their Photos or gallery: "
+        + "operate_app finds and shares those."
     var parameters: JSONValue {
         Schema.object([
             "app": Schema.string("The app, as the person said it: Instagram, WhatsApp, Facebook, X, Google Drive, Google Photos, Mail, or another."),
@@ -242,6 +246,11 @@ struct PhotoShareTool: KairosTool {
     }
 
     func validate(_ args: JSONValue, ctx: TurnContext) -> Validation {
+        // "The picture from my gallery": share_photo would open the camera for a photo that already exists.
+        let latest = ctx.userWords.split(separator: "\n").last.map(String.init) ?? ""
+        if !PhotoMatch.isPhotoArrival(latest), PhotoMatch.has(PhotoMatch.padded(latest), PhotoMatch.existingPhoto) {
+            return .block("That photo is already in your gallery, so I won't open the camera for it.")
+        }
         guard let app = args.text("app") else {
             return .clarify("Which app should the photo go to? For example WhatsApp or Instagram.")
         }
@@ -488,6 +497,15 @@ enum PhotoMatch {
     /// Other helpers' jobs: letters and bills (letter reader), reminders and alarms (planner).
     static let notMine = ["letter", "bill", "form", "document", "statement", "envelope", "remind", "reminder", "alarm",
                           "timer", "every day", "scam"]
+    /// The same sentence also gives a permission ("you don't need to ask me before posting"): the model does both.
+    static let grantWords = ["without asking", "need to ask", "don t ask", "dont ask", "no need to ask", "allow",
+                             "permission"]
+    /// A photo that is already in Photos ("the picture of the cake from my gallery"): the phone operator finds it,
+    /// the camera mustn't open.
+    static let existingPhoto = ["gallery", "camera roll", "from my photos", "in my photos", "photos app", "photo library",
+                                "i took", "we took", "you took", "he took", "she took", "they took", "already taken",
+                                "already took", "the one from", "from last", "from yesterday", "old photo", "old photos",
+                                "old picture", "old pictures"]
     static let arrivalFolded = PhotoStore.promptPrefix.folded
 
     /// "Here's the photo for: …" (the camera handing a photo back).
@@ -504,16 +522,30 @@ enum PhotoMatch {
     static func wantsNewPhoto(_ words: String) -> Bool {
         guard !isPhotoArrival(words) else { return false }
         let w = padded(words)
-        guard has(w, takeVerbs), has(w, photoNouns), !has(w, notMine) else { return false }
+        guard has(w, takeVerbs), has(w, photoNouns), !has(w, notMine), !has(w, grantWords), !has(w, existingPhoto) else {
+            return false
+        }
         if has(w, shareVerbs) || PhotoShareSkills.knownApp(in: words) != nil { return true }
         return PhotoStore.shared.pendingPrompt != nil
+    }
+
+    /// "Take the picture of the cake from my gallery and put it on my Facebook" -> "Facebook": a photo that is already
+    /// in Photos going to an app. The phone operator finds and shares it; the camera mustn't open.
+    static func appForPhotoInGallery(_ words: String) -> String? {
+        guard !isPhotoArrival(words) else { return nil }
+        let w = padded(words)
+        guard has(w, existingPhoto), has(w, photoNouns), has(w, shareVerbs), !has(w, notMine), !has(w, grantWords),
+              let app = PhotoShareSkills.knownApp(in: words) else { return nil }
+        return app.name
     }
 
     /// "Post it to Instagram", "send that photo to Mum on WhatsApp", or the camera's "Here's the photo for: …".
     static func wantsShareOfPhotoInHand(_ words: String) -> Bool {
         if isPhotoArrival(words) { return true }
         let w = padded(words)
-        guard has(w, shareVerbs), !has(w, takeVerbs), !has(w, notMine) else { return false }
+        guard has(w, shareVerbs), !has(w, takeVerbs), !has(w, notMine), !has(w, grantWords), !has(w, existingPhoto) else {
+            return false
+        }
         // "post it", "send that", or the photo by name; not "send Mum a WhatsApp saying it's raining".
         return has(w, photoNouns) || has(w, pronounAfter(shareVerbs))
     }

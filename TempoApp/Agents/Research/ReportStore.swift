@@ -181,6 +181,11 @@ final class ReportStore: ObservableObject {
 }
 
 extension ResearchReport {
+    /// No real web page behind it. A report saved by an older build could have only a made-up "Google Search: …" link
+    /// to Google's own results page as its source (for answers Google gave without any web page): nobody checked
+    /// that, so the report is never answered from or listed as if it had been researched.
+    var isUnchecked: Bool { !sources.contains { !WorkerHonesty.isSearchPage($0.url) } }
+
     /// The whole report as Markdown (what Share sends).
     var markdown: String {
         let f = DateFormatter()

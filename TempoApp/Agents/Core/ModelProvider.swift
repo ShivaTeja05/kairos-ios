@@ -464,6 +464,18 @@ enum AgentSettings {
     /// Asked in turn when the person's model is busy (429). Google's free allowance is per model.
     static let backupModels = ["gemini-2.5-flash", "gemini-3.5-flash"]
 
+    /// Who thinks for Kairos when the rules on the phone don't know a request.
+    /// - mac: the open model on the person's own Mac (kairos-mesh, over their private Tailscale network). No API key.
+    /// - gemini: Google's Gemini with the person's key, here on the phone (can use the phone's tools directly).
+    enum Brain: String { case mac, gemini }
+    static let brainDefaultsKey = "kairos.agents.brain"
+
+    /// The person's choice; until they choose, Gemini only if a key is already saved (nothing changes for them).
+    static var brain: Brain {
+        get { UserDefaults.standard.string(forKey: brainDefaultsKey).flatMap(Brain.init(rawValue:)) ?? (hasKey ? .gemini : .mac) }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: brainDefaultsKey) }
+    }
+
     /// Only real model names are kept. Anything else (an API key pasted into the model box once caused 404s)
     /// is wiped from UserDefaults, which, unlike the Keychain, is not a safe place for a key.
     static var model: String {
@@ -539,8 +551,9 @@ enum AgentSettings {
 
     /// Gemini with the saved keys, the person's model first and the backup models after it. Background work
     /// (worker agents, the research team) passes `.background`, so the person's own requests go first.
+    /// Nil unless Gemini is the person's chosen brain: with "Your Mac", nothing on the phone calls Google.
     static func provider(timeout: TimeInterval = 25, priority: GeminiPriority = .foreground) -> (any ModelProvider)? {
-        guard let key else { return nil }
+        guard brain == .gemini, let key else { return nil }
         return GeminiProvider(model: model, apiKey: key, timeout: timeout, fallbackModels: backupModels,
                               backupKey: backupKey, priority: priority)
     }

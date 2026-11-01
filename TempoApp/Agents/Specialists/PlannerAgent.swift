@@ -27,10 +27,19 @@ struct PlannerAgent: SpecialistAgent {
     var instructions: String {
         """
         Alarms, timers, reminders and the calendar on this phone. \
-        set_alarm: to wake the person or ring loudly at a clock time ("wake me at 7", "alarm for my bus at 8:10"); it rings even on silent. \
+        set_alarm: to wake the person or ring loudly at a clock time ("wake me at 7", "alarm for my bus at 8:10"); it rings even on silent; \
+        it can repeat every day, every weekday (Monday to Friday) or once a week. \
         set_timer: a countdown in minutes ("timer for the oven, 40 minutes"). \
+        "Remind me" or "wake me" N minutes before or after a clock time is set_alarm (or create_reminder) at that clock time \
+        minus or plus N ("an hour before my 10 o'clock" is 09:00), never set_timer. A clock time with no am or pm that has \
+        already gone today means the next one. \
         create_reminder: to remind them to do something at a time ("remind me to take my pills at 8 tonight"; repeat "daily" for "every night"); \
-        also for a deadline from a letter, but only after the person says yes. \
+        also for a deadline from a letter, but only after the person says yes. If they said "remind me" but not when, ask when; \
+        never save a reminder without a time unless they said they don't want one. \
+        Alarms and reminders only go off at a clock time: there is no reminder for when someone arrives or leaves, or for a \
+        place. Say so in a few words and ask what time instead; don't look anyone up for it. \
+        Alarms, timers and reminders go on THIS phone only. If they want one on someone else's phone, say you can't, and offer, \
+        as a question, to text that person instead. \
         add_calendar_event: an appointment on a day and time ("put the dentist in for Tuesday at 3"). \
         get_calendar_events: when they ask what is on a day ("what's on tomorrow?"). \
         If they did not say when, ask one short question; never invent a time. "At 3" means 15:00 unless they say morning or am. \
@@ -61,33 +70,40 @@ struct PlannerAgent: SpecialistAgent {
 
 struct PlannerSetAlarmTool: KairosTool {
     let name = "set_alarm"
-    let summary = "Set a loud alarm at a clock time, once or every day. It rings even when the phone is on silent."
+    let summary = "Set a loud alarm at a clock time on this phone, once, every day, every weekday or once a week. It rings even when the phone is on silent."
     let risk: Risk = .localWrite
     var parameters: JSONValue {
         Schema.object([
             "time_hhmm": Schema.string("24-hour time, e.g. \"07:00\" or \"18:30\""),
             "label": Schema.string("What it is for, in a word or two, e.g. \"Wake up\", \"Bus\", \"Pills\""),
-            "day_iso": Schema.string("Only if they named a day: the date, e.g. \"2026-10-26\". Leave out for the next time that clock comes round."),
-            "repeat_daily": Schema.boolean("true if they want it every day"),
+            "day_iso": Schema.string("Only if they named a day: the date, e.g. \"2026-10-26\". Leave out for the next time that clock comes round. When changing an alarm from earlier in this conversation (\"make it 8 instead\"), that alarm's day."),
+            "repeat": Schema.string("How often: none, daily (every day), weekdays (Monday to Friday), or weekly (that day each week)",
+                                    oneOf: ["none", "daily", "weekdays", "weekly"]),
         ], required: ["time_hhmm", "label"])
     }
 
     func quickMatch(_ words: String, ctx: TurnContext) -> JSONValue? {
-        guard !PlannerWords.severalRequests(words) else { return nil }
+        guard !PlannerWords.severalRequests(words), !PlannerWords.otherDevice(words) else { return nil }
         let w = PlannerWords.core(words)
         guard let first = w.first,
               w.contains("alarm") || PlannerWords.starts(w, ["wake", "me"]) || PlannerWords.starts(w, ["wake", "up"]),
               ["set", "alarm", "an", "a", "wake", "make", "put", "new", "create", "give"].contains(first),
               !w.contains(where: { PlannerWords.notAnAlarmCommand.contains($0) }),
               let heard = SpokenTime.parse(words, now: ctx.now, calendar: ctx.calendar, prefer: .alarm),
-              heard.clockCount == 1 || heard.relative != nil, heard.clockSaid || heard.relative != nil
+              heard.clockCount == 1 || heard.relative != nil, heard.clockSaid || heard.relative != nil,
+              // Words about when that the rules don't understand ("every other day") go to the model, never into the label.
+              !PlannerWords.unreadTime(heard.leftover)
         else { return nil }
+        // A label is a word or two ("Bus", "Hospital"). More than that is something else the person asked for
+        // ("… and tells me tomorrow's weather"), so the model decides.
+        let label = PlannerWords.alarmLabel(from: heard.leftover)
+        guard label.split(separator: " ").count <= PlannerWords.longestLabel else { return nil }
         var args: [String: JSONValue] = [
             "time_hhmm": .string(SpokenTime.hhmm(heard.date, calendar: ctx.calendar)),
-            "label": .string(PlannerWords.alarmLabel(from: heard.leftover)),
+            "label": .string(label),
         ]
         if heard.daySaid || heard.relative != nil { args["day_iso"] = .string(SpokenTime.dayString(heard.date, calendar: ctx.calendar)) }
-        if heard.repeats == .daily { args["repeat_daily"] = true }
+        if heard.repeats != .none { args["repeat"] = .string(heard.repeats.rawValue) }
         return .object(args)
     }
 
@@ -136,7 +152,7 @@ struct PlannerSetTimerTool: KairosTool {
     }
 
     func quickMatch(_ words: String, ctx: TurnContext) -> JSONValue? {
-        guard !PlannerWords.severalRequests(words) else { return nil }
+        guard !PlannerWords.severalRequests(words), !PlannerWords.otherDevice(words) else { return nil }
         let toks = SpokenTime.tokens(words)
         let w = toks.map { $0.w }
         let range = PlannerWords.coreRange(w)
@@ -149,6 +165,10 @@ struct PlannerSetTimerTool: KairosTool {
         // Whatever is left after the length and the command words is the label ("for the oven" → Oven).
         let rest = core.indices.filter { !(d.start..<(d.start + d.length)).contains($0) && !PlannerWords.timerFiller.contains(core[$0].w) }
         if rest.contains(where: { SpokenTime.number(core, $0) != nil }) { return nil }  // a second number we don't understand
+        // "10 minutes before my bus", "every 20 minutes": not a plain countdown, so the model decides. Nor is a long
+        // label: "research the fuel rules, and while that's going set a timer" holds another request.
+        if rest.contains(where: { PlannerWords.notACountdown.contains(core[$0].w) || core[$0].w.contains(":") }) { return nil }
+        if rest.count > PlannerWords.longestLabel { return nil }
         let label = rest.isEmpty ? "Timer" : PlannerWords.capitalisedFirst(rest.map { core[$0].raw }.joined(separator: " "))
         return ["minutes": .number(d.seconds / 60), "label": .string(label)]
     }
@@ -193,18 +213,18 @@ struct PlannerCreateReminderTool: KairosTool {
     var parameters: JSONValue {
         Schema.object([
             "title": Schema.string("What to remember, short, in their words, e.g. \"Take pills\", \"Ring the GP\""),
-            "due_iso": Schema.string("When to remind them: local date and time, e.g. \"2026-10-25T20:00:00+00:00\". Leave out only if they want no time."),
-            "repeat": Schema.string("How often", oneOf: ["none", "daily", "weekly"]),
+            "due_iso": Schema.string("When to remind them: local date and time, e.g. \"2026-10-25T20:00:00+00:00\". Leave out only for a to-do with no alert (\"put milk on my list\"). If they said \"remind me\" but not when, ask when instead of calling this."),
+            "repeat": Schema.string("How often: weekdays is Monday to Friday", oneOf: ["none", "daily", "weekdays", "weekly"]),
         ], required: ["title"])
     }
 
     func quickMatch(_ words: String, ctx: TurnContext) -> JSONValue? {
-        guard !PlannerWords.severalRequests(words) else { return nil }
+        guard !PlannerWords.severalRequests(words), !PlannerWords.otherDevice(words) else { return nil }
         let w = PlannerWords.core(words)
         guard let trigger = PlannerWords.reminderTriggers.first(where: { PlannerWords.starts(w, $0) }),
               !trigger.isEmpty, !w.contains("alarm"), !w.contains("timer"),
               let heard = SpokenTime.parse(words, now: ctx.now, calendar: ctx.calendar, prefer: .general),
-              heard.clockCount <= 1
+              heard.clockCount <= 1, !PlannerWords.unreadTime(heard.leftover)
         else { return nil }
         var left = PlannerWords.strip(heard.leftover, leading: PlannerWords.politePrefixes, once: false)
         left = PlannerWords.strip(left, leading: PlannerWords.reminderTriggers, once: true)
@@ -533,12 +553,27 @@ enum PlannerWhen {
         return forms.contains { docs.contains($0) }
     }
 
+    /// The person's latest line, when it is the person speaking (not a Shortcut's text).
+    static func latestWords(_ ctx: TurnContext) -> String? {
+        guard ctx.source != .automation else { return nil }
+        return ctx.userWords.split(separator: "\n").last.map(String.init)
+    }
+
     static func alarm(_ args: JSONValue, ctx: TurnContext) -> PlannerCheck<PlannerAlarmPlan> {
         let cal = ctx.calendar, now = ctx.now
-        let heard = heard(ctx, prefer: .alarm)
+        // Kairos can only ring this phone: "on my husband's phone" must not quietly set an alarm here. (Not checked
+        // when the words hold several requests: "… and text my son on his phone" is about the text.)
+        if let latest = latestWords(ctx), PlannerWords.otherDevice(latest), !PlannerWords.severalRequests(latest) {
+            return .problem(.clarify(PlannerWords.otherDeviceAnswer))
+        }
         let label = PlannerWords.cleanLabel(args.text("label"), fallback: "Alarm")
-        var repeats: SpokenTime.Repeat = (args["repeat_daily"]?.bool ?? false) ? .daily : .none
+        // An alarm named from an earlier sentence: the time in the latest words belongs to something else.
+        let heard = PlannerWords.fromEarlierLine(label, ctx: ctx) ? nil : heard(ctx, prefer: .alarm)
+        var repeats = SpokenTime.Repeat(rawValue: args.text("repeat")?.lowercased() ?? "")
+            ?? ((args["repeat_daily"]?.bool ?? false) ? .daily : .none)  // repeat_daily: routines saved before
         if let r = heard?.repeats, r != .none { repeats = r }
+        // "Oh actually, make it 8 instead" after "an alarm for 7 tomorrow": still tomorrow, not this morning.
+        let earlierDay = heard?.daySaid == true ? nil : PlannerWords.correctedDay(ctx)
 
         var modelDate: Date?
         if let tm = args.text("time_hhmm") {
@@ -547,6 +582,7 @@ enum PlannerWhen {
             } else if let (h, m) = hourMinute(tm) {
                 var day = cal.startOfDay(for: now)
                 if let d = args.text("day_iso").flatMap({ SpokenTime.isoWallClock($0, calendar: cal) }) { day = cal.startOfDay(for: d.date) }
+                else if let earlierDay { day = earlierDay }
                 modelDate = cal.date(bySettingHour: h, minute: m, second: 0, of: day)
             }
         }
@@ -560,6 +596,9 @@ enum PlannerWhen {
             (date, corrected) = merge(md, heard: heard, ctx: ctx)
         } else if let heard, heard.clockCount <= 1, heard.clockSaid || heard.relative != nil {
             date = heard.date
+            if heard.relative == nil, let earlierDay {
+                date = cal.date(bySettingHour: heard.hour, minute: heard.minute, second: 0, of: earlierDay) ?? date
+            }
             corrected = true
         } else {
             return .problem(.clarify("What time shall I set it for?"))
@@ -574,14 +613,19 @@ enum PlannerWhen {
             date = cal.date(bySettingHour: h, minute: m, second: 0, of: now) ?? date
             if date <= now { date = cal.date(byAdding: .day, value: 1, to: date) ?? date.addingTimeInterval(86_400) }
         }
+        // Every weekday starts on a weekday ("starting Monday" when it's said at the weekend).
+        if repeats == .weekdays { date = SpokenTime.nextWeekday(date, calendar: cal) }
         return .ready(PlannerAlarmPlan(date: date, repeats: repeats, label: label, corrected: corrected))
     }
 
     static func timer(_ args: JSONValue, ctx: TurnContext) -> PlannerCheck<PlannerTimerPlan> {
         let label = PlannerWords.cleanLabel(args.text("label"), fallback: "Timer")
+        let latest = latestWords(ctx)
+        if let latest, PlannerWords.otherDevice(latest), !PlannerWords.severalRequests(latest) {
+            return .problem(.clarify(PlannerWords.otherDeviceAnswer))
+        }
         var heardLength: TimeInterval?
-        if ctx.source != .automation, let words = ctx.userWords.split(separator: "\n").last.map(String.init),
-           !PlannerWords.severalRequests(words) {
+        if let words = latest, !PlannerWords.severalRequests(words) {
             let found = SpokenTime.durations(in: words)
             if found.count == 1 { heardLength = found[0] }
         }
@@ -589,6 +633,8 @@ enum PlannerWhen {
         var corrected = false
         if let minutes = args["minutes"]?.double, minutes > 0 {
             seconds = minutes * 60
+            // Checked even when the words hold several requests: a timer can't stand in for a time of day.
+            if let words = latest, let problem = clockNotCountdown(words, seconds: seconds, ctx: ctx) { return .problem(problem) }
             if let h = heardLength, abs(h - seconds) > 1 { seconds = h; corrected = true }
         } else if let h = heardLength {
             seconds = h
@@ -602,6 +648,23 @@ enum PlannerWhen {
         return .ready(PlannerTimerPlan(seconds: seconds, label: label, corrected: corrected))
     }
 
+    /// "Tell me when it's ten minutes before my 4:15 bus" is a time of day, not a countdown: a timer for a number
+    /// of minutes the person never said would ring at the wrong time.
+    static func clockNotCountdown(_ words: String, seconds: TimeInterval, ctx: TurnContext) -> Validation? {
+        guard let said = SpokenTime.parse(words, now: ctx.now, calendar: ctx.calendar), said.relative == nil else { return nil }
+        if said.shift != nil, said.clockCount == 1 {
+            let when = SpokenTime.spoken(said.date, now: ctx.now, calendar: ctx.calendar)
+            return .clarify("A timer only counts minutes from now. Shall I set an alarm for \(when) instead?")
+        }
+        guard said.clockSaid else { return nil }
+        // The minutes must be ones the person said: "20 minutes", or a plain "make it 15".
+        let toks = SpokenTime.tokens(words)
+        let lengths = SpokenTime.durationMatches(toks).map(\.seconds)
+        let numbers = toks.indices.compactMap { SpokenTime.number(toks, $0).map { Double($0.0) * 60 } }
+        if (lengths + numbers).contains(where: { abs($0 - seconds) <= 1 }) { return nil }
+        return .clarify("How many minutes shall I set the timer for? If you meant a time of day, I can set an alarm instead.")
+    }
+
     static func reminder(_ args: JSONValue, ctx: TurnContext) -> PlannerCheck<PlannerReminderPlan> {
         let cal = ctx.calendar, now = ctx.now
         guard let rawTitle = args.text("title") else {
@@ -609,7 +672,9 @@ enum PlannerWhen {
         }
         let title = PlannerWords.capitalisedFirst(String(rawTitle.prefix(200)))
         var repeats = SpokenTime.Repeat(rawValue: args.text("repeat")?.lowercased() ?? "none") ?? .none
-        let heard = heard(ctx, prefer: .general)
+        // A reminder named from an earlier sentence ("ring the surgery", when they now say "and another one at 2 to
+        // pick up my prescription"): the time in the latest words belongs to the new one, not to this.
+        let heard = PlannerWords.fromEarlierLine(title, ctx: ctx) ? nil : heard(ctx, prefer: .general)
         if let r = heard?.repeats, r != .none { repeats = r }
 
         var due: Date?
@@ -621,6 +686,8 @@ enum PlannerWhen {
             due = heard.date  // the model left the time out, but the person said one
             corrected = true
         }
+        // "Remind me to ring the council" with no time: a reminder without one never goes off, so ask when.
+        if due == nil, let question = PlannerWords.askWhen(ctx) { return .problem(.clarify(question)) }
 
         if var d = due, d < now.addingTimeInterval(-60) {
             guard repeats != .none else {
@@ -633,6 +700,7 @@ enum PlannerWhen {
             }
             due = d
         }
+        if repeats == .weekdays, let d = due { due = SpokenTime.nextWeekday(d, calendar: cal) }
         return .ready(PlannerReminderPlan(title: title, due: due, repeats: repeats, corrected: corrected))
     }
 
@@ -748,6 +816,12 @@ final class PlannerStore: @unchecked Sendable {
             switch repeats {
             case .daily: reminder.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: .daily, interval: 1, end: nil))
             case .weekly: reminder.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: .weekly, interval: 1, end: nil))
+            case .weekdays:
+                let days: [EKWeekday] = [.monday, .tuesday, .wednesday, .thursday, .friday]
+                reminder.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: .weekly, interval: 1,
+                                                            daysOfTheWeek: days.map { EKRecurrenceDayOfWeek($0) },
+                                                            daysOfTheMonth: nil, monthsOfTheYear: nil, weeksOfTheYear: nil,
+                                                            daysOfTheYear: nil, setPositions: nil, end: nil))
             case .none: break
             }
         }
@@ -853,6 +927,9 @@ enum PlannerAlarmKit {
         case .weekly:
             let day = everyDay[((comps.weekday ?? 1) - 1 + 7) % 7]
             schedule = .relative(Alarm.Schedule.Relative(time: time, repeats: .weekly([day])))
+        case .weekdays:
+            schedule = .relative(Alarm.Schedule.Relative(time: time, repeats: .weekly([.monday, .tuesday, .wednesday,
+                                                                                      .thursday, .friday])))
         }
 
         // A plain alert with one big Stop button. No countdown, so no widget extension is needed.
@@ -968,6 +1045,8 @@ enum PlannerWords {
         "text", "message", "call", "ring", "phone", "email", "send", "tell", "pay", "read", "set", "remind", "add", "put",
         "what", "whats", "wake", "check", "open", "show", "find", "play", "turn", "cancel", "delete", "make", "start",
         "book", "is", "are", "how", "translate", "explain", "give", "help",
+        // "… and then reply saying I'll call her tonight"
+        "reply", "respond", "forward", "share", "post", "save", "write",
     ]
     static let notAnAlarmCommand: Set<String> = ["remind", "reminder", "timer", "calendar", "diary", "cancel", "delete",
                                                  "stop", "off", "snooze", "what", "whats", "when", "change", "move", "is"]
@@ -979,7 +1058,7 @@ enum PlannerWords {
     static let alarmFiller: Set<String> = ["set", "an", "a", "alarm", "me", "up", "for", "please", "at", "to", "make",
                                            "put", "on", "can", "you", "could", "would", "kairos", "the", "my", "new",
                                            "i", "want", "need", "will", "shall", "give", "create", "wake", "ring", "it",
-                                           "hey", "ok", "okay", "just", "thanks"]
+                                           "hey", "ok", "okay", "just", "thanks", "phone", "iphone", "another"]
     static let dayQuestions: [[String]] = [
         ["whats", "on"], ["what", "is", "on"], ["what", "have", "i", "got"], ["what", "have", "i", "on"],
         ["what", "do", "i", "have"], ["what", "am", "i", "doing"], ["whats", "happening"], ["what", "is", "happening"],
@@ -1030,12 +1109,168 @@ enum PlannerWords {
     /// "… and text my son", "… then call Priya": a second request the model should handle.
     static func severalRequests(_ text: String) -> Bool {
         let w = SpokenTime.tokens(text).map { $0.w }
+        var reminder: Bool?
         for (k, x) in w.enumerated() where x == "and" || x == "then" {
             var j = k + 1
             while j < w.count, ["also", "then", "please", "can", "could", "you", "will", "just"].contains(w[j]) { j += 1 }
-            if j < w.count, requestVerbs.contains(w[j]) { return true }
+            guard j < w.count, requestVerbs.contains(w[j]) else { continue }
+            // "Remind me at 10 to buy a card and post it": the posting is part of what to remember.
+            if reminderTaskVerbs.contains(w[j]) {
+                if reminder == nil { let c = core(text); reminder = reminderTriggers.contains { starts(c, $0) } }
+                if reminder == true { continue }
+            }
+            return true
         }
         return false
+    }
+    /// After "and" in a reminder ("… and post Mum's card", "… and write the cheque"), part of the same thing to do.
+    static let reminderTaskVerbs: Set<String> = ["post", "save", "write", "share"]
+
+    /// Words about when that the rules can't read yet ("every other day", "at weekends", "monthly", "next month"):
+    /// a rule that sees one stands back for the model, instead of putting it in the label or title. Some only count
+    /// next to another word, so "the monthly rent", "another tablet" and "each grandchild" stay in the title.
+    static let unreadTimeWords: Set<String> = [
+        "every", "weekday", "weekdays", "weekend", "weekends", "fortnight", "workday", "workdays", "annually",
+    ]
+    /// "pay the rent monthly", not "the monthly rent".
+    static let unreadTimeAdverbs: Set<String> = ["monthly", "yearly", "hourly", "fortnightly"]
+    static let timeUnits: Set<String> = ["day", "days", "morning", "mornings", "afternoon", "afternoons", "evening",
+                                         "evenings", "night", "nights", "week", "weeks", "month", "months", "year",
+                                         "years", "weekday", "weekdays", "weekend", "weekends", "fortnight", "hour", "hours"]
+    static let lengthWords: Set<String> = ["minute", "minutes", "min", "mins", "hour", "hours", "hr", "hrs"]
+    static func unreadTime(_ leftover: [String]) -> Bool {
+        let w = leftover.map(norm)
+        let small: Set<String> = ["a", "an", "the", "my", "our", "your", "his", "her", "their", "this", "that"]
+        let numbers: Set<String> = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                                    "eleven", "twelve", "few", "couple", "several"]
+        for (i, x) in w.enumerated() {
+            let before = i > 0 ? w[i - 1] : "", after = i + 1 < w.count ? w[i + 1] : ""
+            if unreadTimeWords.contains(x) { return true }
+            switch x {
+            case "each":  // "each morning", "each Tuesday"
+                if timeUnits.contains(after) || SpokenTime.weekdays[after] != nil { return true }
+            case "working":  // "on working days", not "check the heating is working"
+                if ["day", "days", "week", "weeks"].contains(after) { return true }
+            case _ where unreadTimeAdverbs.contains(x):
+                let owner = i > 0 && leftover[i - 1].lowercased().hasSuffix("'s")
+                if !small.contains(before), !owner { return true }
+            case "month", "months", "year", "years":  // "next month", "in 3 months", "the end of the month"
+                if ["every", "each", "next", "a", "per", "this", "last", "coming", "following"].contains(before)
+                    || numbers.contains(before) || Int(before) != nil || (before == "the" && i > 1 && w[i - 2] == "of") {
+                    return true
+                }
+            case "earlier", "later":  // "wake me at 6, half an hour earlier" (than usual): not a label
+                if lengthWords.contains(before) { return true }
+            case "another":  // a second alarm: "and another an hour later", "and another one"; not "another tablet"
+                var j = i + 1
+                if j < w.count, w[j] == "one" { j += 1 }
+                let next = w[j..<min(w.count, j + 3)]
+                if next.isEmpty || next.contains(where: { lengthWords.contains($0) || $0 == "later" || $0 == "earlier" }) {
+                    return true
+                }
+            default: break
+            }
+        }
+        return false
+    }
+
+    /// The most words an alarm or timer label from the rules may have.
+    static let longestLabel = 4
+
+    /// Left over in a timer command, these make it something other than a plain countdown ("10 minutes before my bus").
+    static let notACountdown: Set<String> = ["before", "after", "earlier", "later", "until", "till", "every", "each",
+                                             "oclock", "am", "pm"]
+
+    /// "Set an alarm on my husband's phone", "put a reminder in Ravi's iPad": a phone that isn't this one. Kairos can
+    /// only ring this one. Only someone else's device ("his", "her", "their", "Ravi's") right after on/in/onto/to, in
+    /// words led by set or put. Not "an alarm for 3 to ring Ravi on his mobile" (the phone is about the call), "for my
+    /// GP phone appointment", "on my iPhone", or "a timer for Ravi's iPad time".
+    static let deviceWords: Set<String> = ["phone", "iphone", "mobile", "ipad"]
+    static let deviceNouns: Set<String> = ["call", "calls", "appointment", "appointments", "interview", "number", "numbers",
+                                           "bill", "bills", "time"]
+    static let otherOwners: Set<String> = ["his", "her", "their"]
+    static let notPossessive: Set<String> = ["its", "thats", "whats", "theres", "heres", "whos", "hes", "shes", "lets",
+                                             "wheres", "hows"]
+    static let placingVerbs: Set<String> = ["set", "put", "add", "make", "create"]
+    static let reachingVerbs: Set<String> = ["ring", "call", "phone", "text", "message", "email", "send", "tell", "facetime",
+                                             "whatsapp", "reply"]
+    static func otherDevice(_ text: String) -> Bool {
+        let toks = SpokenTime.tokens(text)
+        let w = toks.map { $0.w }
+        for d in w.indices where d >= 2 && deviceWords.contains(w[d]) {
+            if d + 1 < w.count, deviceNouns.contains(w[d + 1]) { continue }
+            let owner = toks[d - 1].raw.lowercased()
+            guard otherOwners.contains(owner) || owner.hasSuffix("s'")
+                    || (owner.hasSuffix("'s") && !notPossessive.contains(w[d - 1])) else { continue }
+            // "on Ravi's phone", "on my husband's phone"
+            var at = d - 2
+            if ["my", "our", "the"].contains(w[at]), at > 0 { at -= 1 }
+            guard ["on", "onto", "in", "to"].contains(w[at]) else { continue }
+            for v in stride(from: at - 1, through: 0, by: -1) {
+                if reachingVerbs.contains(w[v]) { break }
+                if placingVerbs.contains(w[v]) { return true }
+            }
+        }
+        return false
+    }
+    static let otherDeviceAnswer = "I can only set alarms and reminders on this iPhone, not on anyone else's phone. Shall I send them a text to remind them instead?"
+
+    /// "Oh actually", "make it 8 instead", "change it to 9": the person is changing what they just asked for.
+    static func isCorrection(_ text: String) -> Bool {
+        let w = SpokenTime.tokens(text).map { $0.w }
+        if w.contains("instead") || w.contains("actually") || w.contains("rather") { return true }
+        return zip(w, w.dropFirst()).contains { ["make", "change", "move"].contains($0.0) && ["it", "that"].contains($0.1) }
+    }
+
+    /// The day of the time said just before a correction ("an alarm for 7 tomorrow", then "make it 8 instead").
+    static func correctedDay(_ ctx: TurnContext) -> Date? {
+        guard ctx.source != .automation else { return nil }
+        let lines = ctx.userWords.split(separator: "\n").map(String.init)
+        guard lines.count >= 2, let latest = lines.last, isCorrection(latest),
+              let before = SpokenTime.parse(lines[lines.count - 2], now: ctx.now, calendar: ctx.calendar, prefer: .alarm),
+              before.clockSaid || before.daySaid else { return nil }
+        return ctx.calendar.startOfDay(for: before.date)
+    }
+
+    /// Small words that don't tell two titles apart.
+    static let titleSmallWords: Set<String> = ["the", "and", "for", "about", "with", "from", "your", "my", "alarm",
+                                               "reminder", "remind", "wake", "set", "that", "this", "time"]
+
+    /// The title (or label) came from an earlier sentence, not the latest one: none of its words are in the latest
+    /// line, and some are in an earlier one ("ring the surgery", when they now say "and another one at 2"). Not for
+    /// a correction ("make it 8:20 instead"): then the latest time is for that same item.
+    static func fromEarlierLine(_ title: String, ctx: TurnContext) -> Bool {
+        guard ctx.source != .automation else { return false }
+        let lines = ctx.userWords.split(separator: "\n").map(String.init)
+        guard lines.count >= 2, let latest = lines.last, !isCorrection(latest) else { return false }
+        func words(_ s: String) -> Set<String> { Set(SpokenTime.tokens(s).map { $0.w }) }
+        let content = words(title).filter { $0.count >= 3 && !titleSmallWords.contains($0) }
+        guard !content.isEmpty, content.isDisjoint(with: words(latest)) else { return false }
+        return lines.dropLast().contains { !content.isDisjoint(with: words($0)) }
+    }
+
+    /// "Put milk on my list", "no particular time": the person doesn't want an alert.
+    static let noTimePhrases = ["no time", "any time", "anytime", "no particular time", "dont need a time",
+                                "don t need a time", "without a time", "no alarm", "no alert", "on my list", "to my list",
+                                "on the list", "to do list", "todo", "just a note"]
+    static func noTimeWanted(_ text: String) -> Bool {
+        let folded = " " + text.folded + " "
+        return noTimePhrases.contains { folded.contains(" " + $0 + " ") }
+    }
+
+    /// The question to ask when the model would save a reminder with no time: the person said "remind me" but not
+    /// when (and didn't say they want no time). Nil when that isn't so.
+    static func askWhen(_ ctx: TurnContext) -> String? {
+        guard ctx.source != .automation, let latest = ctx.userWords.split(separator: "\n").last.map(String.init) else { return nil }
+        let w = core(latest)
+        guard reminderTriggers.contains(where: { starts(w, $0) }),
+              SpokenTime.parse(latest, now: ctx.now, calendar: ctx.calendar) == nil,
+              !noTimeWanted(latest) else { return nil }
+        // "Remind me when my daughter gets home": reminders only go off at a clock time.
+        if w.contains("when") || w.contains("whenever") || latest.folded.contains("as soon as") {
+            return "I can only remind you at a time of day, not when something happens. What time shall I remind you?"
+        }
+        return "When would you like me to remind you?"
     }
 
     /// Takes known word sequences off the front of raw words (compared lowercased, without apostrophes).

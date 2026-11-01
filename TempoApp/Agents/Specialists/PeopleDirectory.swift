@@ -450,6 +450,11 @@ final class PeopleDirectory: @unchecked Sendable {
     /// The phone's region ("GB"), which decides what "07700 900123" means.
     static var region: String? { Locale.current.region?.identifier }
     static var isUK: Bool { ["GB", "JE", "GG", "IM"].contains(region ?? "GB") }
+    /// The UK helplines (111, 159, 101, 105) work here: a UK region, or a UK clock on a phone whose region was left
+    /// at another country (many people keep the language and region of their family's country).
+    static var usesUKServices: Bool {
+        isUK || ["Europe/London", "Europe/Jersey", "Europe/Guernsey", "Europe/Isle_of_Man"].contains(TimeZone.current.identifier)
+    }
 
     private static func callingCode(_ region: String?) -> String? {
         switch region {

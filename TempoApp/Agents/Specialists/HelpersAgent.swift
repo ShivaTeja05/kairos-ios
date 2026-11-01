@@ -1,10 +1,12 @@
 import Foundation
 #if canImport(UIKit)
 import UIKit
+import AVFoundation
 #endif
 
 // The everyday helper: directions (Apple Maps), the weather (free Open-Meteo: no key, no location permission),
-// simple step-by-step help with the phone's settings, the person's own Shortcuts, and the time and date.
+// simple step-by-step help with the phone's settings, the person's own Shortcuts, the time and date, this iPhone's
+// battery and its torch.
 // Every answer is built here in plain words from real data; the model only picks the tool.
 
 struct HelpersAgent: SpecialistAgent {
@@ -15,11 +17,17 @@ struct HelpersAgent: SpecialistAgent {
     var instructions: String {
         var s = "Use get_directions when the person wants to go somewhere or asks the way (walking unless they mention "
             + "a car, driving, a bus or a train). Use get_weather for the weather, rain, cold or what to wear outside, today or "
-            + "tomorrow; leave the place out to use their home town. Use open_phone_setting when they ask how to change something "
-            + "on the phone (bigger writing, Wi-Fi, Bluetooth, notifications, general settings) or what Kairos is allowed "
-            + "to use; it gives them simple steps. Use run_my_shortcut only when the person asks you to run one of their "
-            + "own Shortcuts by name. Use what_time_and_date for the time, the day or the date here. For general questions "
-            + "(facts, spellings, meanings, recipes) answer directly in a sentence or two, without tools."
+            + "tomorrow; leave the place out to use their home town, but when they name a town or say they're going "
+            + "somewhere (\"I'm going to Manchester, what's it like there?\") pass that place. Use phone_battery when they "
+            + "ask how much battery this iPhone has left, and torch to turn this iPhone's torch on or off. "
+            + "Use open_phone_setting when they ask how to change something on the phone (bigger writing, Wi-Fi, Bluetooth, "
+            + "notifications) or what Kairos is allowed to use; it only explains kairos_settings, text_size, wifi, bluetooth "
+            + "and notifications, with simple steps. When they ask you to find a setting and change it for them (Auto-Lock, "
+            + "the screen going dark too soon), use operate_app with app Settings. Kairos can't control the heating, lights, "
+            + "TV or other things in the home: say so kindly, with no tool, and say how they can do it themselves. "
+            + "Use run_my_shortcut only when the person asks you to run one of their own Shortcuts by name. Use "
+            + "what_time_and_date for the time, the day or the date here. For general questions (facts, spellings, meanings, "
+            + "recipes) answer directly in a sentence or two, without tools."
         let allowed = HelpersSettings.allowedShortcuts
         if !allowed.isEmpty {
             s += " The only Shortcuts you may run are: " + allowed.map { "\"\($0)\"" }.joined(separator: ", ") + "."
@@ -29,7 +37,8 @@ struct HelpersAgent: SpecialistAgent {
 
     var tools: [any KairosTool] {
         // Order matters for the rules-first match: the most exact phrases first.
-        [HelpersTimeTool(), HelpersWeatherTool(), HelpersPhoneSettingTool(), HelpersDirectionsTool(), HelpersShortcutTool()]
+        [HelpersTimeTool(), HelpersBatteryTool(), HelpersTorchTool(), HelpersWeatherTool(), HelpersPhoneSettingTool(),
+         HelpersDirectionsTool(), HelpersShortcutTool()]
     }
 }
 
@@ -66,27 +75,242 @@ enum HelpersSettings {
 
 struct HelpersTimeTool: KairosTool {
     let name = "what_time_and_date"
-    let summary = "Tells the person the time, the day and the date here on this phone, in plain words. Use it for "
-        + "'what time is it', 'what day is it' or 'what's the date'."
+    let summary = "Tells the person the time, the day and the date, in plain words: here on this phone, or in another "
+        + "city or country (place: 'Hyderabad', 'New York'). Use it for 'what time is it', 'what time is it in "
+        + "Hyderabad', 'what day is it' or 'what's the date'."
     var parameters: JSONValue {
-        Schema.object(["include_year": Schema.boolean("True when the person asked for the date or the year.")])
+        Schema.object(["include_year": Schema.boolean("True when the person asked for the date or the year."),
+                       "place": Schema.string("A city or country somewhere else, only when the person named one.")])
     }
     let risk = Risk.read
 
     func quickMatch(_ words: String, ctx: TurnContext) -> JSONValue? {
+        // "What time is it in Hyderabad right now?": the clock somewhere else.
+        if let place = WorldClock.askedPlace(words) { return ["place": .string(place), "include_year": false] }
         guard let ask = HelpersMatch.timeQuestion(words) else { return nil }
         return ["include_year": .bool(ask == .date)]
     }
 
-    func describe(_ args: JSONValue, ctx: TurnContext) -> String { "The time and date" }
+    func describe(_ args: JSONValue, ctx: TurnContext) -> String {
+        args.text("place").map { "The time in \($0)" } ?? "The time and date"
+    }
 
     func execute(_ args: JSONValue, ctx: TurnContext) async throws -> ToolResult {
-        let say = HelpersSpeech.timeAndDate(ctx.now, calendar: ctx.calendar, includeYear: args["include_year"]?.bool ?? false)
+        var calendar = ctx.calendar
+        var zone = ctx.timeZone
+        var prefix = ""
+        if let place = args.text("place") {
+            guard let there = WorldClock.zone(for: place) else {
+                return ToolResult(ok: true, say: "I don't know the time zone for \(place). Which country is it in?", isAnswer: true)
+            }
+            zone = there
+            calendar.timeZone = there
+            prefix = "In \(place.capitalized) "
+        }
+        var say = HelpersSpeech.timeAndDate(ctx.now, calendar: calendar, includeYear: args["include_year"]?.bool ?? false)
+        // "It's 10 past 3, on Saturday…" -> "In Hyderabad it's 10 past 3, on Saturday…" (no clock-change note there).
+        if !prefix.isEmpty {
+            let body = say.hasPrefix("It's ") ? String(say.dropFirst(5)) : say
+            let first = body.components(separatedBy: ". ").first ?? body
+            say = prefix + "it's " + first + (first.hasSuffix(".") ? "" : ".")
+        }
         let iso = ISO8601DateFormatter()
-        iso.timeZone = ctx.timeZone
+        iso.timeZone = zone
         return ToolResult(ok: true, say: say,
-                          data: ["now": .string(iso.string(from: ctx.now)), "time_zone": .string(ctx.timeZone.identifier)],
+                          data: ["now": .string(iso.string(from: ctx.now)), "time_zone": .string(zone.identifier)],
                           isAnswer: HelpersSpeech.speaksEnglish(ctx))
+    }
+}
+
+/// The time somewhere else: the cities and countries the people Kairos is for call most, then any city that names
+/// an iOS time zone ("Karachi" -> Asia/Karachi). Countries with several zones (USA, Australia, Canada) need a city.
+enum WorldClock {
+    static let zones: [String: String] = [
+        "india": "Asia/Kolkata", "hyderabad": "Asia/Kolkata", "secunderabad": "Asia/Kolkata", "mumbai": "Asia/Kolkata",
+        "bombay": "Asia/Kolkata", "delhi": "Asia/Kolkata", "new delhi": "Asia/Kolkata", "chennai": "Asia/Kolkata",
+        "madras": "Asia/Kolkata", "bangalore": "Asia/Kolkata", "bengaluru": "Asia/Kolkata", "kolkata": "Asia/Kolkata",
+        "calcutta": "Asia/Kolkata", "pune": "Asia/Kolkata", "ahmedabad": "Asia/Kolkata", "vijayawada": "Asia/Kolkata",
+        "visakhapatnam": "Asia/Kolkata", "vizag": "Asia/Kolkata", "warangal": "Asia/Kolkata", "guntur": "Asia/Kolkata",
+        "tirupati": "Asia/Kolkata", "amritsar": "Asia/Kolkata", "chandigarh": "Asia/Kolkata", "kerala": "Asia/Kolkata",
+        "goa": "Asia/Kolkata", "punjab": "Asia/Kolkata", "gujarat": "Asia/Kolkata", "andhra": "Asia/Kolkata",
+        "telangana": "Asia/Kolkata", "tamil nadu": "Asia/Kolkata",
+        "pakistan": "Asia/Karachi", "lahore": "Asia/Karachi", "islamabad": "Asia/Karachi", "karachi": "Asia/Karachi",
+        "mirpur": "Asia/Karachi", "bangladesh": "Asia/Dhaka", "dhaka": "Asia/Dhaka", "sylhet": "Asia/Dhaka",
+        "sri lanka": "Asia/Colombo", "colombo": "Asia/Colombo", "nepal": "Asia/Kathmandu",
+        "poland": "Europe/Warsaw", "warsaw": "Europe/Warsaw", "krakow": "Europe/Warsaw", "wales": "Europe/London",
+        "cardiff": "Europe/London", "scotland": "Europe/London", "edinburgh": "Europe/London", "uk": "Europe/London",
+        "england": "Europe/London", "london": "Europe/London", "ireland": "Europe/Dublin", "dublin": "Europe/Dublin",
+        "dubai": "Asia/Dubai", "abu dhabi": "Asia/Dubai", "uae": "Asia/Dubai", "qatar": "Asia/Qatar", "doha": "Asia/Qatar",
+        "saudi": "Asia/Riyadh", "saudi arabia": "Asia/Riyadh", "riyadh": "Asia/Riyadh", "jeddah": "Asia/Riyadh",
+        "singapore": "Asia/Singapore", "malaysia": "Asia/Kuala_Lumpur", "kuala lumpur": "Asia/Kuala_Lumpur",
+        "hong kong": "Asia/Hong_Kong", "china": "Asia/Shanghai", "beijing": "Asia/Shanghai", "shanghai": "Asia/Shanghai",
+        "japan": "Asia/Tokyo", "tokyo": "Asia/Tokyo", "philippines": "Asia/Manila", "manila": "Asia/Manila",
+        "new york": "America/New_York", "boston": "America/New_York", "washington": "America/New_York",
+        "new jersey": "America/New_York", "atlanta": "America/New_York", "chicago": "America/Chicago",
+        "dallas": "America/Chicago", "houston": "America/Chicago", "texas": "America/Chicago", "denver": "America/Denver",
+        "los angeles": "America/Los_Angeles", "san francisco": "America/Los_Angeles", "seattle": "America/Los_Angeles",
+        "california": "America/Los_Angeles", "bay area": "America/Los_Angeles", "toronto": "America/Toronto",
+        "vancouver": "America/Vancouver", "sydney": "Australia/Sydney", "melbourne": "Australia/Melbourne",
+        "perth": "Australia/Perth", "brisbane": "Australia/Brisbane", "new zealand": "Pacific/Auckland",
+        "auckland": "Pacific/Auckland", "nigeria": "Africa/Lagos", "lagos": "Africa/Lagos", "kenya": "Africa/Nairobi",
+        "nairobi": "Africa/Nairobi", "south africa": "Africa/Johannesburg", "johannesburg": "Africa/Johannesburg",
+        "egypt": "Africa/Cairo", "cairo": "Africa/Cairo", "germany": "Europe/Berlin", "berlin": "Europe/Berlin",
+        "france": "Europe/Paris", "paris": "Europe/Paris", "spain": "Europe/Madrid", "madrid": "Europe/Madrid",
+        "italy": "Europe/Rome", "rome": "Europe/Rome",
+    ]
+
+    static func zone(for place: String) -> TimeZone? {
+        let key = place.folded.replacingOccurrences(of: #"^(the|in) "#, with: "", options: .regularExpression)
+        if let id = zones[key], let z = TimeZone(identifier: id) { return z }
+        let city = key.replacingOccurrences(of: " ", with: "_")
+        let id = TimeZone.knownTimeZoneIdentifiers.first { $0.split(separator: "/").last?.lowercased() == city }
+        return id.flatMap(TimeZone.init(identifier:))
+    }
+
+    /// "What time is it in Hyderabad (right now)?", "What's the time in New York?" -> the place, when it's a known one.
+    static func askedPlace(_ words: String) -> String? {
+        let f = words.folded
+        guard f.range(of: #"\b(time|what day|date)\b"#, options: .regularExpression) != nil,
+              let m = f.range(of: #"\b(?:in|over in|out in)\s+([a-z ]{2,30}?)(?:\s+(?:right now|now|today|at the moment|currently|just now))?$"#,
+                              options: .regularExpression) else { return nil }
+        let place = String(f[m]).replacingOccurrences(of: #"^(?:over in|out in|in)\s+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+(?:right now|now|today|at the moment|currently|just now)$"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        // "What time is it in the morning there" or "in an hour" are not places.
+        guard !place.isEmpty, zone(for: place) != nil else { return nil }
+        return place
+    }
+}
+
+// MARK: - This iPhone's battery
+
+/// "How much battery has my phone got left?": read from the iPhone itself, nothing changed.
+struct HelpersBatteryTool: KairosTool {
+    let name = "phone_battery"
+    let summary = "Says how much battery this iPhone has left and whether it's charging. Only this iPhone: for the "
+        + "person's Mac or laptop use ask_my_mac."
+    var parameters: JSONValue { Schema.none }
+    let risk = Risk.read
+
+    func quickMatch(_ words: String, ctx: TurnContext) -> JSONValue? {
+        HelpersMatch.batteryQuestion(words) ? .object([:]) : nil
+    }
+
+    func describe(_ args: JSONValue, ctx: TurnContext) -> String { "Check this iPhone's battery" }
+
+    func execute(_ args: JSONValue, ctx: TurnContext) async throws -> ToolResult {
+        let reading = await HelpersBattery.read()
+        let english = HelpersSpeech.speaksEnglish(ctx)
+        guard let percent = reading.percent else {
+            return ToolResult(ok: false, say: HelpersBattery.whereToLook,
+                              data: ["error": "The battery level isn't available on this phone right now.",
+                                     "where_to_look": .string(HelpersBattery.whereToLook)],
+                              isAnswer: english)
+        }
+        var say = "Your iPhone has \(percent) per cent battery left"
+        if reading.full {
+            say += ", it's fully charged."
+        } else if reading.charging {
+            say += ", and it's charging."
+        } else {
+            say += "."
+            if percent <= 20 { say += " It's getting low, so it's a good idea to plug it in soon." }
+        }
+        return ToolResult(ok: true, say: say,
+                          data: ["percent": .number(Double(percent)), "charging": .bool(reading.charging),
+                                 "full": .bool(reading.full), "device": "this iPhone"],
+                          isAnswer: english)
+    }
+}
+
+enum HelpersBattery {
+    struct Reading: Sendable { var percent: Int?; var charging: Bool; var full: Bool }
+
+    static let whereToLook = "I can't read the battery just now. You can see it in the top right corner of the screen: "
+        + "swipe down from there to see how much is left. Or open Settings, then tap Battery."
+
+    @MainActor static func read() -> Reading {
+        #if canImport(UIKit)
+        let device = UIDevice.current
+        device.isBatteryMonitoringEnabled = true   // the level reads -1 until this is on
+        let level = device.batteryLevel
+        let state = device.batteryState
+        let percent = level < 0 ? nil : Int((Double(level) * 100).rounded())
+        return Reading(percent: percent, charging: state == .charging, full: state == .full)
+        #else
+        return Reading(percent: nil, charging: false, full: false)
+        #endif
+    }
+}
+
+// MARK: - The torch
+
+/// "Put the torch on", "turn the torch off". Only while Kairos is open on the screen: iOS doesn't let an app in the
+/// background use the camera's light.
+struct HelpersTorchTool: KairosTool {
+    let name = "torch"
+    let summary = "Turns this iPhone's torch (flashlight) on or off. Only while Kairos is open on the screen."
+    var parameters: JSONValue {
+        Schema.object(["state": Schema.string("On or off.", oneOf: ["on", "off"])], required: ["state"])
+    }
+    let risk = Risk.localWrite
+
+    func quickMatch(_ words: String, ctx: TurnContext) -> JSONValue? {
+        guard let on = HelpersMatch.torchRequest(words) else { return nil }
+        return ["state": .string(on ? "on" : "off")]
+    }
+
+    func describe(_ args: JSONValue, ctx: TurnContext) -> String {
+        HelpersTorch.wantsOn(args) ? "Turn the torch on" : "Turn the torch off"
+    }
+
+    func execute(_ args: JSONValue, ctx: TurnContext) async throws -> ToolResult {
+        let on = HelpersTorch.wantsOn(args)
+        guard ctx.canShowUI else { return .fail(HelpersTorch.notOpen) }
+        switch await HelpersTorch.set(on) {
+        case .done:
+            let say = on ? "I've turned the torch on. Say \"turn the torch off\" when you're done."
+                         : "I've turned the torch off."
+            return ToolResult(ok: true, say: say, data: ["torch": .string(on ? "on" : "off")])
+        case .notOpen:
+            return .fail(HelpersTorch.notOpen)
+        case .noTorch:
+            return .fail("This iPhone hasn't got a torch I can use. " + HelpersTorch.yourself)
+        case .failed:
+            return .fail("The torch didn't \(on ? "come on" : "go off") just now. " + HelpersTorch.yourself)
+        }
+    }
+}
+
+enum HelpersTorch {
+    enum Outcome: Sendable { case done, notOpen, noTorch, failed }
+
+    static let yourself = "Swipe down from the top right corner of the screen and tap the torch button, or ask Siri to "
+        + "\"turn on the torch\"."
+    static let notOpen = "I can only use the torch while Kairos is open on the screen. " + yourself
+
+    static func wantsOn(_ args: JSONValue) -> Bool { args.text("state")?.folded != "off" }
+
+    @MainActor static func set(_ on: Bool) -> Outcome {
+        #if canImport(UIKit)
+        guard UIApplication.shared.applicationState == .active else { return .notOpen }
+        guard let device = AVCaptureDevice.default(for: .video), device.hasTorch else { return .noTorch }
+        guard !on || device.isTorchAvailable else { return .failed }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if on {
+                try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+            } else {
+                device.torchMode = .off
+            }
+            return .done
+        } catch {
+            return .failed
+        }
+        #else
+        return .noTorch
+        #endif
     }
 }
 
@@ -107,7 +331,8 @@ struct HelpersDirectionsTool: KairosTool {
 
     func quickMatch(_ words: String, ctx: TurnContext) -> JSONValue? {
         let t = HelpersMatch.tokens(words)
-        guard (3...20).contains(t.count), !HelpersMatch.asksForOtherThings(t),
+        // "Directions to Boots and put my flu jab in for 3pm": two requests, so the model does both.
+        guard (3...20).contains(t.count), !HelpersMatch.asksForOtherThings(t), !PlannerWords.severalRequests(words),
               let found = HelpersDirections.parse(words) else { return nil }
         return ["destination": .string(found.destination), "mode": .string(HelpersDirections.mode(from: found.rest))]
     }
@@ -231,7 +456,10 @@ struct HelpersWeatherTool: KairosTool {
 
     func quickMatch(_ words: String, ctx: TurnContext) -> JSONValue? {
         let t = HelpersMatch.tokens(words)
-        guard (1...16).contains(t.count), !HelpersMatch.asksForOtherThings(t) else { return nil }
+        // "What's the weather tomorrow and how do I get to Bicester Village": two requests, so the model does both.
+        guard (1...16).contains(t.count), !HelpersMatch.asksForOtherThings(t), !PlannerWords.severalRequests(words) else {
+            return nil
+        }
         let f = " " + t.joined(separator: " ") + " "
         let asks = t.contains("weather") || t.contains("forecast") || [
             " will it rain ", " is it going to rain ", " going to rain ", " is it raining ", " will it snow ",
@@ -245,7 +473,13 @@ struct HelpersWeatherTool: KairosTool {
                                       "saturday", "sunday", "yesterday", "month", "days"]
         guard otherDays.isDisjoint(with: t) else { return nil }
         var args: [String: JSONValue] = ["day": .string(t.contains("tomorrow") ? "tomorrow" : "today")]
-        if let place = HelpersMatch.weatherPlace(in: words) { args["place"] = .string(place) }
+        if let place = HelpersMatch.weatherPlace(in: words) {
+            args["place"] = .string(place)
+        } else if HelpersMatch.pointsAtAnotherPlace(words) {
+            // "I'm going to Manchester tomorrow, what's it like there?": a place the rule can't read. The model fills
+            // it in, instead of the rule answering for the home town.
+            return nil
+        }
         return .object(args)
     }
 
@@ -524,11 +758,12 @@ enum HelpersWeather {
 struct HelpersPhoneSettingTool: KairosTool {
     let name = "open_phone_setting"
     let summary = "Helps with the phone's settings. kairos_settings opens Kairos's own page in the Settings app (to let "
-        + "Kairos use the microphone, contacts and so on). text_size, wifi, bluetooth, notifications and general give the "
-        + "person simple spoken steps, because apps are not allowed to open those pages."
+        + "Kairos use the microphone, contacts and so on). text_size, wifi, bluetooth and notifications give the person "
+        + "simple spoken steps, because apps are not allowed to open those pages. Only these five: not for the torch, "
+        + "the battery, the heating, or changing a setting for them."
     var parameters: JSONValue {
         Schema.object([
-            "setting": Schema.string("Which setting.", oneOf: HelpersPhoneSteps.settings),
+            "setting": Schema.string("Which setting.", oneOf: HelpersPhoneSteps.offered),
         ], required: ["setting"])
     }
     let risk = Risk.read
@@ -597,7 +832,10 @@ struct HelpersPhoneSettingTool: KairosTool {
 
 /// Where things are in the Settings app on iOS 26 (the same paths as iOS 17 and 18). Each step starts with a verb.
 enum HelpersPhoneSteps {
-    static let settings = ["kairos_settings", "text_size", "wifi", "bluetooth", "notifications", "general"]
+    /// What the model is offered. "general" is still understood (a plain "settings"), but it isn't offered: a
+    /// "find the General settings" walk-through fits any question, so it was picked when nothing else fitted.
+    static let offered = ["kairos_settings", "text_size", "wifi", "bluetooth", "notifications"]
+    static let settings = offered + ["general"]
 
     /// The setting asked for, tolerating the model's own spellings ("text size", "Wi-Fi", "kairos").
     static func setting(_ args: JSONValue) -> String? {
@@ -606,7 +844,7 @@ enum HelpersPhoneSteps {
         if settings.contains(f) { return f }
         switch f {
         case "wi_fi", "wireless", "internet": return "wifi"
-        case "text", "font", "font_size", "writing", "larger_text", "bigger_text", "display": return "text_size"
+        case "text", "font", "font_size", "writing", "larger_text", "bigger_text": return "text_size"
         case "notification", "alerts": return "notifications"
         case "kairos", "app", "app_settings", "permissions", "privacy", "microphone", "contacts": return "kairos_settings"
         case "settings", "general_settings": return "general"
@@ -692,6 +930,20 @@ struct HelpersShortcutTool: KairosTool {
                 return .block("That Shortcut was named in the letter or message, not by you, so I won't run it. If you want it, tell me its name yourself.")
             }
             return .clarify("Which of your Shortcuts should I run? Please tell me its name.")
+        }
+        // With no list from a helper, any name would do, so the person has to have asked for a Shortcut: "In Google
+        // Maps, find…" is the Google Maps app, and "turn the heating up" isn't a Shortcut they named.
+        if allowed.isEmpty {
+            let latest = " " + (ctx.userWords.components(separatedBy: "\n").last ?? "").folded + " "
+            if !latest.contains(" shortcut") {
+                if let bundle = OperatorAppCatalog.knownBundle(name) {
+                    let app = OperatorAppCatalog.displayName(bundle, fallback: name)
+                    return .clarify("Do you mean one of your Shortcuts, or the \(app) app?")
+                }
+                if ![" run ", " start "].contains(where: { latest.contains($0) }) {
+                    return .clarify("Do you mean one of your Shortcuts? If so, say \"run my shortcut\" and its name.")
+                }
+            }
         }
         return .ok
     }
@@ -918,9 +1170,9 @@ enum HelpersMatch {
         return t.joined(separator: " ").contains("and then")
     }
 
-    /// The first capture group of a case-insensitive pattern.
-    static func capture(_ pattern: String, in s: String) -> String? {
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+    /// The first capture group of a pattern (case-insensitive unless asked).
+    static func capture(_ pattern: String, in s: String, caseSensitive: Bool = false) -> String? {
+        guard let re = try? NSRegularExpression(pattern: pattern, options: caseSensitive ? [] : [.caseInsensitive]),
               let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)), m.numberOfRanges > 1,
               let r = Range(m.range(at: 1), in: s) else { return nil }
         return String(s[r])
@@ -945,9 +1197,81 @@ enum HelpersMatch {
                                       "the match", "the garden", "the bus", "the beach", "the school run", "the funeral",
                                       "the wedding", "the party", "the market"]
         if ["a", "an", "my", "your", "this", "that", "all", "our"].contains(first) { return nil }
+        // "wake me up at half six", "at seven": a time, not a place.
+        if clockWords.contains(first) || first.first?.isNumber == true { return nil }
         if first == "the", t.count >= 2, timeWords.contains(t[1]) { return nil }
         if notPlaces.contains(t.joined(separator: " ")) || (t.count == 1 && timeWords.contains(first)) { return nil }
         return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// "How much battery has my phone got left?", "what's my battery at?": this iPhone's battery level. Not another
+    /// device's battery, not how to save battery, and not a reminder about it.
+    static func batteryQuestion(_ words: String) -> Bool {
+        let t = tokens(words)
+        guard (2...16).contains(t.count), !asksForOtherThings(t), !PlannerWords.severalRequests(words) else { return false }
+        let f = " " + t.joined(separator: " ") + " "
+        let about = t.contains("battery") || [" is my phone charged ", " is my iphone charged ", " how much charge "]
+            .contains(where: { f.contains($0) })
+        guard about else { return false }
+        let level = [" how much ", " left ", " level ", " percent ", " per cent ", " battery at ", " battery on ",
+                     " how s my battery ", " how is my battery ", " what s my battery ", " what is my battery ",
+                     " check my battery ", " check the battery ", " battery status ", " is my phone charged ",
+                     " is my iphone charged ", " how much charge ", " running low ", " battery low "]
+        guard level.contains(where: { f.contains($0) }) else { return false }
+        let otherThings: Set<String> = ["mac", "macs", "macbook", "laptop", "computer", "ipad", "watch", "airpods", "headphones",
+                                        "earphones", "earbuds", "hearing", "aid", "aids", "car", "mouse", "keyboard", "torch",
+                                        "remote", "smoke", "doorbell", "scooter", "wheelchair", "camera", "save", "saver",
+                                        "saving", "health", "replace", "replacement", "drain", "draining", "dying", "longer",
+                                        "setting", "settings", "why", "batteries"]
+        return otherThings.isDisjoint(with: t)
+    }
+
+    /// "Put the torch on", "turn off the flashlight", "torch on please": true for on, false for off, nil otherwise.
+    static func torchRequest(_ words: String) -> Bool? {
+        let t = tokens(words)
+        guard (2...24).contains(t.count), !asksForOtherThings(t), !PlannerWords.severalRequests(words) else { return nil }
+        let f = " " + t.joined(separator: " ") + " "
+        let torch = #"(?:torch|torchlight|flashlight|flash light)"#
+        guard f.range(of: " " + torch + " ", options: .regularExpression) != nil,
+              Set(t).isDisjoint(with: ["battery", "camera", "app", "buy", "shortcut", "where", "charge", "charger"]) else { return nil }
+        let patterns: [(String, Bool)] = [
+            (#" (?:turn|switch|put|flick|pop|stick) (?:the |my |your |phone s |iphone s )?"# + torch + #" (?:on|off) "#, true),
+            (#" (?:turn|switch|put) (?:on|off) (?:the |my |your |phone s |iphone s )?"# + torch + " ", true),
+            (" " + torch + #" (?:on|off) "#, true),
+            (#" (?:need|want|use) (?:the |a |my |your )?"# + torch + " ", false),
+        ]
+        for (pattern, saysOnOff) in patterns {
+            guard let r = f.range(of: pattern, options: .regularExpression) else { continue }
+            guard saysOnOff else { return true }
+            return !f[r].contains(" off ")
+        }
+        return nil
+    }
+
+    /// Words that start a time of day ("half six", "quarter past", "seven o'clock").
+    static let clockWords: Set<String> = ["half", "quarter", "one", "two", "three", "four", "five", "six", "seven", "eight",
+                                          "nine", "ten", "eleven", "twelve", "twenty", "thirty", "forty", "fifty"]
+
+    /// The words name a place weatherPlace can't read: "I'm going to Manchester tomorrow", "visiting Leeds", "what's
+    /// it like there". Then the model picks the place, not the rule.
+    static func pointsAtAnotherPlace(_ words: String) -> Bool {
+        let notNames: Set<String> = ["today", "tomorrow", "tonight", "monday", "tuesday", "wednesday", "thursday", "friday",
+                                     "saturday", "sunday", "i", "the"]
+        if let name = capture(#"\b(?:to|visiting|in|at|from|near)\s+([A-Z][a-z]+)"#, in: words, caseSensitive: true),
+           !notNames.contains(name.lowercased()) {
+            return true
+        }
+        let f = " " + words.folded + " "
+        let patterns = [
+            #" (?:off|trip|travelling|traveling|heading|heading off|flying|driving|going up|going down|going over) to [a-z]"#,
+            #" visiting [a-z]"#,
+            // Only someone going somewhere ("I'm going to Leeds"): "what's the weather going to look like" stays home.
+            #"(?:^| i m| im| i am| we re| we are| were| i ll be| i will be| we ll be| we will be| he s| she s| they re) going to (?!(?:rain|snow|be|get|stay|freeze|stop|start|clear|brighten|pour|hail|thunder|need|have|take|wear|go|do|bring|feel|turn|warm|cool|heat|dry|the|a|my|bed|sleep|church|work|school|town|be) )[a-z]+ "#,
+            #" (?:like|over|up|down) there "#,
+            #" there (?:today|tomorrow|tonight|later|this) "#,
+            #" there $"#,
+        ]
+        return patterns.contains { f.range(of: $0, options: .regularExpression) != nil }
     }
 
     /// "what time is it", "what's the date", "what day is it today": the whole request, nothing more.

@@ -8,7 +8,8 @@ import Foundation
 // Pure Foundation, so the self-test runs on a Mac.
 
 struct SpokenTime: Equatable, Sendable {
-    enum Repeat: String, Sendable { case none, daily, weekly }
+    /// "weekdays" is Monday to Friday ("every weekday", "on working days").
+    enum Repeat: String, Sendable { case none, daily, weekly, weekdays }
     /// How to read a bare hour like "at 7": alarms lean to the morning, everything else to the waking day
     /// (1–6 is afternoon, 7–11 is morning, or this evening when the morning has gone).
     enum Prefer: Sendable { case general, alarm }
@@ -26,6 +27,9 @@ struct SpokenTime: Equatable, Sendable {
     var daySaid = false
     /// "in 20 minutes": seconds from now.
     var relative: TimeInterval?
+    /// "an hour before my 10 o'clock": the time was moved this far from the clock time said (minus is earlier).
+    /// `date`, `hour` and `minute` are already the moved time.
+    var shift: TimeInterval?
     var repeats: Repeat = .none
     /// How many clock times the words hold. More than one: don't correct the model with any of them.
     var clockCount = 0
@@ -107,10 +111,35 @@ extension SpokenTime {
     /// Words that can sit around a bare answer like "10" or "make it half 8".
     static let fillers: Set<String> = ["at", "about", "around", "for", "please", "ok", "okay", "make", "it", "say", "um",
                                        "er", "erm", "lets", "shall", "we", "just", "yes", "yeah", "actually",
-                                       "sorry", "then", "maybe", "perhaps", "kairos", "thanks", "thank", "you"]
+                                       "sorry", "then", "maybe", "perhaps", "kairos", "thanks", "thank", "you",
+                                       "oh", "no", "instead"]
     /// Words that belong to the time phrase that follows them ("at 8", "on Tuesday", "every night").
     static let absorbed: Set<String> = ["at", "on", "for", "by", "in", "this", "next", "the", "every", "each", "around",
                                         "about", "of", "from", "coming", "starting"]
+
+    /// "an hour before", "ten minutes after": the length is counted back (-1) or on (+1) from a clock time.
+    static let shiftWords: [String: Double] = ["before": -1, "beforehand": -1, "earlier": -1, "prior": -1,
+                                               "after": 1, "later": 1]
+    /// Words that may sit between "before" and the clock time it is measured from ("before my 4:15 bus").
+    static let shiftLinks: Set<String> = ["my", "the", "your", "his", "her", "our", "their", "that", "this", "it", "its", "to"]
+
+    /// "every weekday", "on weekdays", "working days", "Monday to Friday": Monday to Friday, at k.
+    /// The tokens used, or nil. `single`: the singular forms count too (after "every" or "each").
+    static func workWeek(_ t: [Token], _ k: Int, single: Bool) -> Int? {
+        func w(_ j: Int) -> String { j >= 0 && j < t.count ? t[j].w : "" }
+        if ["weekdays", "workdays"].contains(w(k)) { return 1 }
+        if single, ["weekday", "workday"].contains(w(k)) { return 1 }
+        if w(k) == "week" || w(k) == "working" || w(k) == "work",
+           w(k + 1) == "days" || (single && w(k + 1) == "day") { return 2 }
+        if w(k) == "monday" || w(k) == "mondays", ["to", "through", "till", "until"].contains(w(k + 1)),
+           w(k + 2) == "friday" || w(k + 2) == "fridays" { return 3 }
+        return nil
+    }
+
+    /// A part of the day, also in the plural: "mornings" after "every weekday".
+    static func periodWord(_ w: String) -> Period? {
+        periodWords[w] ?? (w.hasSuffix("s") ? periodWords[String(w.dropLast())] : nil)
+    }
 
     /// A whole number at i: digits ("20") or words ("twenty five"). The value and how many tokens it used.
     static func number(_ t: [Token], _ i: Int) -> (Int, Int)? {
@@ -245,19 +274,35 @@ extension SpokenTime {
         var weekdayRoll = false
         var relative: TimeInterval?
 
-        // 1. Repeats: "every night", "each day", "daily", "every Tuesday".
+        // 1. Repeats: "every night", "each day", "daily", "every Tuesday", "every weekday", "on working days".
+        /// "every Tuesday morning", "every weekday mornings": the part of the day goes with the repeat.
+        func periodAfterRepeat(_ k: Int) {
+            if k < n, !used[k], let p = periodWord(w(k)) { repeatPeriod = p; mark(k, 1) }
+        }
         for i in 0..<n where !used[i] {
             let x = w(i)
             if x == "every" || x == "each" {
                 let next = w(i + 1)
                 if next == "single", w(i + 2) == "day" { repeats = .daily; mark(i, 3) }
-                else if next == "day" { repeats = .daily; mark(i, 2) }
+                else if let l = workWeek(t, i + 1, single: true) { repeats = .weekdays; mark(i, l + 1); periodAfterRepeat(i + 1 + l) }
+                else if next == "day" {
+                    repeats = .daily; mark(i, 2)
+                    // "every day Monday to Friday" is the working week
+                    if let l = workWeek(t, i + 2, single: true) { repeats = .weekdays; mark(i + 2, l) }
+                }
                 else if let p = periodWords[next] { repeats = .daily; repeatPeriod = p; mark(i, 2) }
                 else if next == "week" { repeats = .weekly; mark(i, 2) }
-                else if let wd = weekdays[next] { repeats = .weekly; repeatWeekday = wd; mark(i, 2) }
+                else if let wd = weekdays[next] { repeats = .weekly; repeatWeekday = wd; mark(i, 2); periodAfterRepeat(i + 2) }
             } else if x == "daily" { repeats = .daily; mark(i, 1) }
             else if x == "nightly" { repeats = .daily; repeatPeriod = .night; mark(i, 1) }
             else if x == "weekly" { repeats = .weekly; mark(i, 1) }
+            else if x == "on" || x == "from", let l = workWeek(t, i + 1, single: false) {
+                repeats = .weekdays; mark(i, l + 1); periodAfterRepeat(i + 1 + l)
+            }
+            else if number(t, i - 1) == nil, let l = workWeek(t, i, single: false) {
+                // "weekdays at 7", but not "in 3 working days"
+                repeats = .weekdays; mark(i, l); periodAfterRepeat(i + l)
+            }
             else if x == "on", let wd = weekdays[w(i + 1)], w(i + 1).hasSuffix("s") { repeats = .weekly; repeatWeekday = wd; mark(i, 2) }
         }
 
@@ -270,7 +315,18 @@ extension SpokenTime {
         }
 
         // 3. Days: today, tonight, tomorrow, this evening, next Tuesday, 1st November, 3/11, 2026-11-01, in 3 days.
-        func setDay(_ d: Date) { if dayStart == nil { dayStart = cal.startOfDay(for: d) } }
+        /// The first day said wins, except that a calendar date ("7th November") wins over a weekday name said before
+        /// it: "on Saturday 7th November", said on a Saturday, is next Saturday, not today.
+        var dayFromWeekday = false
+        func setDay(_ d: Date, explicit: Bool = false) {
+            if dayStart == nil {
+                dayStart = cal.startOfDay(for: d)
+            } else if explicit, dayFromWeekday {
+                dayStart = cal.startOfDay(for: d)
+                dayFromWeekday = false
+                weekdayRoll = false
+            }
+        }
         func makeDate(year: Int?, month: Int, day: Int) -> Date? {
             var c = DateComponents(year: year ?? cal.component(.year, from: now), month: month, day: day, hour: 12)
             guard let d = cal.date(from: c), cal.component(.day, from: d) == day else { return nil }
@@ -306,8 +362,11 @@ extension SpokenTime {
                 let prefixed = weekdays[x] == nil  // "next Tuesday", "on Tuesday"
                 var delta = (wd - todayWeekday + 7) % 7
                 if prefixed && x == "next" && delta == 0 { delta = 7 }
-                if delta == 0 && !(prefixed && x == "next") { weekdayRoll = true }
-                setDay(addDays(delta, today))
+                if dayStart == nil {
+                    if delta == 0 && !(prefixed && x == "next") { weekdayRoll = true }
+                    setDay(addDays(delta, today))
+                    dayFromWeekday = true
+                }
                 len = prefixed ? 2 : 1
                 if let p = periodWords[w(i + len)] { dayPeriod = dayPeriod ?? p; len += 1 }
             } else if x == "in", let (v, l) = number(t, i + 1), w(i + 1 + l) == "days" || w(i + 1 + l) == "day" {
@@ -321,15 +380,15 @@ extension SpokenTime {
                 var k = i + l
                 if w(k) == "of" { k += 1 }
                 if let m = months[w(k)], let date = makeDate(year: yearAt(k + 1), month: m, day: d) {
-                    setDay(date); len = k + 1 - i + (yearAt(k + 1) != nil ? 1 : 0)
+                    setDay(date, explicit: true); len = k + 1 - i + (yearAt(k + 1) != nil ? 1 : 0)
                 } else if w(i - 1) == "the", ordinal(t, i) != nil {
                     // "on the 3rd": this month, or next month when the 3rd has gone
                     let c = cal.dateComponents([.year, .month], from: now)
                     if let date = makeDate(year: c.year, month: c.month ?? 1, day: d), cal.startOfDay(for: date) >= today {
-                        setDay(date); len = l
+                        setDay(date, explicit: true); len = l
                     } else if let next = cal.date(byAdding: .month, value: 1, to: today) {
                         let nc = cal.dateComponents([.year, .month], from: next)
-                        if let date = makeDate(year: nc.year, month: nc.month ?? 1, day: d) { setDay(date); len = l }
+                        if let date = makeDate(year: nc.year, month: nc.month ?? 1, day: d) { setDay(date, explicit: true); len = l }
                     }
                 }
             } else if let m = months[x], x != "may" || dayOfMonth(t, i + 1) != nil || dayOfMonth(t, i + 2) != nil {
@@ -337,18 +396,18 @@ extension SpokenTime {
                 var k = i + 1
                 if w(k) == "the" { k += 1 }
                 if let (d, l) = dayOfMonth(t, k), let date = makeDate(year: yearAt(k + l), month: m, day: d) {
-                    setDay(date); len = k + l - i + (yearAt(k + l) != nil ? 1 : 0)
+                    setDay(date, explicit: true); len = k + l - i + (yearAt(k + l) != nil ? 1 : 0)
                 }
             } else if let r = x.range(of: #"^(\d{1,2})/(\d{1,2})(/(\d{2}|\d{4}))?$"#, options: .regularExpression), r.lowerBound == x.startIndex {
                 // UK order: 3/11 is 3 November
                 let parts = x.split(separator: "/").compactMap { Int($0) }
                 if parts.count >= 2 {
                     let y: Int? = parts.count == 3 ? (parts[2] < 100 ? 2000 + parts[2] : parts[2]) : nil
-                    if let date = makeDate(year: y, month: parts[1], day: parts[0]) { setDay(date); len = 1 }
+                    if let date = makeDate(year: y, month: parts[1], day: parts[0]) { setDay(date, explicit: true); len = 1 }
                 }
             } else if x.range(of: #"^\d{4}-\d{1,2}-\d{1,2}$"#, options: .regularExpression) != nil {
                 let parts = x.split(separator: "-").compactMap { Int($0) }
-                if parts.count == 3, let date = makeDate(year: parts[0], month: parts[1], day: parts[2]) { setDay(date); len = 1 }
+                if parts.count == 3, let date = makeDate(year: parts[0], month: parts[1], day: parts[2]) { setDay(date, explicit: true); len = 1 }
             }
             if len > 0 { mark(i, len); i += len } else { i += 1 }
         }
@@ -373,6 +432,30 @@ extension SpokenTime {
             if let first = core.first, let last = core.last, last - first + 1 == core.count,
                let hit = clockAt(t, first, prefer: prefer, bare: true), hit.end == last + 1 {
                 hits.append(hit); mark(hit.start, hit.end - hit.start)
+            }
+        }
+
+        // 5b. A time counted from the clock time said: "ten minutes before my 4:15 bus", "my appointment is at 10,
+        //     set an alarm for an hour before". Only with exactly one clock time, and only when the length is tied
+        //     to it: the clock time comes right after "before" ("before my 4:15"), or was said earlier and nothing
+        //     but filler follows "before". "Take them 30 minutes after eating" isn't moved; nor is "an alarm at 7
+        //     and another an hour later" (two alarms, for the model). Said after the clock time, "earlier" means
+        //     earlier than usual ("wake me at 6, half an hour earlier"), so only "before" moves it there.
+        var shift: TimeInterval?
+        if hits.count == 1, let hit = hits.first,
+           !(0..<n).contains(where: { ["another", "again", "second", "both", "also"].contains(w($0)) }) {
+            var k = 0
+            while k < n, shift == nil {
+                if !used[k], let (s, l) = durationAt(t, k), free(k, l + 1), let sign = shiftWords[w(k + l)] {
+                    let e = k + l + 1
+                    var j = e
+                    while j < n, shiftLinks.contains(w(j)) { j += 1 }
+                    let clockFollows = hit.start == j && (sign < 0 || w(k + l) == "after")
+                    let clockBefore = hit.end <= k && ["before", "beforehand", "prior"].contains(w(k + l))
+                        && (e..<n).allSatisfy { fillers.contains(w($0)) || shiftLinks.contains(w($0)) }
+                    if clockFollows || clockBefore { shift = s * sign; mark(k, l + 1) }
+                }
+                k += 1
             }
         }
 
@@ -450,9 +533,13 @@ extension SpokenTime {
                     date = addDays(repeats == .weekly ? 7 : 1, date)
                 }
             } else if weekdayRoll || repeats != .none {
-                date = addDays(repeats == .daily ? 1 : 7, date)
+                date = addDays(repeats == .daily || repeats == .weekdays ? 1 : 7, date)
             }
         }
+        // "An hour before my 10 o'clock": the clock time said, moved.
+        if let shift { date = date.addingTimeInterval(shift) }
+        // Every weekday starts on a weekday: said on a Saturday, it starts on Monday.
+        if repeats == .weekdays { date = nextWeekday(date, calendar: cal) }
 
         var r = SpokenTime(date: date, hour: cal.component(.hour, from: date), minute: cal.component(.minute, from: date))
         r.clockSaid = !hits.isEmpty
@@ -460,8 +547,20 @@ extension SpokenTime {
         r.daySaid = daySaid
         r.repeats = repeats
         r.clockCount = hits.count
+        r.shift = shift
         r.leftover = leftover
         return r
+    }
+
+    /// The same time on the first Monday-to-Friday day from this one (itself when it is one).
+    static func nextWeekday(_ date: Date, calendar cal: Calendar) -> Date {
+        var d = date
+        var steps = 0
+        while [1, 7].contains(cal.component(.weekday, from: d)), steps < 3 {
+            d = cal.date(byAdding: .day, value: 1, to: d) ?? d.addingTimeInterval(86_400)
+            steps += 1
+        }
+        return d
     }
 
     /// One clock time starting at token i, or nil.
@@ -755,11 +854,13 @@ extension SpokenTime {
         case 0: start = h >= 17 ? "tonight" : "today"
         default: start = dayPhrase(date, now: now, calendar: cal)
         }
+        let part = (h == 12 && m == 0) || (h == 0 && m == 0) ? "" : (h < 12 ? " in the morning" : h < 18 ? " in the afternoon" : " in the evening")
         switch rule {
         case .weekly:
             let wd = weekdayNames[(cal.component(.weekday, from: date) + 6) % 7]
-            let part = (h == 12 && m == 0) || (h == 0 && m == 0) ? "" : (h < 12 ? " in the morning" : h < 18 ? " in the afternoon" : " in the evening")
             return "every \(wd) at \(clock)\(part), starting \(start)"
+        case .weekdays:
+            return "every weekday (Monday to Friday) at \(clock)\(part), starting \(start)"
         case .daily, .none:
             let noun = (h == 12 && m == 0) || (h == 0 && m == 0) ? "day" : partOfDay(h)
             return "at \(clock) every \(noun), starting \(start)"
@@ -845,6 +946,21 @@ extension SpokenTime {
         expect("every Tuesday at 3", on(27, 15), repeats: .weekly)
         expect("half 8", on(26, 8, 30), prefer: .alarm)
         expect("8", on(26, 8), prefer: .alarm)
+        expect("oh actually, make it 8 instead", on(26, 8), prefer: .alarm, clock: true)
+        // A time counted from a clock time, and only when it is tied to it.
+        expect("my appointment is at 10 tomorrow, so set an alarm for an hour before", on(26, 9), prefer: .alarm)
+        expect("tell me when it's ten minutes before my 4:15 bus", on(25, 16, 5))
+        expect("remind me half an hour after my 2 o'clock", on(25, 14, 30))
+        expect("remind me at 6 to take them 30 minutes after eating", on(25, 18))
+        // "Earlier" after the clock time is earlier than usual: the time said stands.
+        expect("set my alarm for 6:30 tomorrow, that's an hour earlier", on(26, 6, 30), prefer: .alarm)
+        // A calendar date wins over the weekday name said with it (said on a Sunday: next Sunday, not today).
+        expect("on Sunday 1st November at 4", on(1, 16, month: 11))
+        // Monday to Friday, starting on the next weekday.
+        expect("set an alarm for half six every weekday for work", on(26, 6, 30), prefer: .alarm, repeats: .weekdays)
+        expect("alarm at 7 on weekdays", on(26, 7), prefer: .alarm, repeats: .weekdays)
+        expect("remind me every Tuesday morning that the bin men come", on(27, 9), repeats: .weekly,
+               leftover: "remind me that the bin men come")
         if let r = parse("take 2 tonight", now: now, calendar: cal), r.clockSaid { failures.append("\"take 2 tonight\": read 2 as a time") }
         if let r = parse("put the dentist in from 10 to 12", now: now, calendar: cal), r.minute == 50 {
             failures.append("\"from 10 to 12\": read as 11:50")
@@ -858,6 +974,8 @@ extension SpokenTime {
         expectSaid(spoken(on(26, 0), now: now, calendar: cal), "midnight tonight")
         expectSaid(clockWords(hour: 23, minute: 45), "quarter to 12")
         expectSaid(repeating(on(25, 20), .daily, now: now, calendar: cal), "at 8 every night, starting tonight")
+        expectSaid(repeating(on(26, 6, 30), .weekdays, now: now, calendar: cal),
+                   "every weekday (Monday to Friday) at half past 6 in the morning, starting tomorrow (Monday)")
         expectSaid(durationWords(5400), "an hour and a half")
         if isoWallClock("2026-10-25T20:00:00+01:00", calendar: cal)?.date != on(25, 20) {
             failures.append("ISO with +01:00 was not read as 20:00 on the wall clock")

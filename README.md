@@ -71,7 +71,25 @@ server, Guardian). Without them, Siri and typing still work.
 
 **Optional: the phone operator** needs the iCTRL runner on the phone (Developer Mode, started from the Mac with
 Xcode). iOS stops the runner whenever the phone locks; keep Auto-Lock off during a demo, or run a watchdog that
-restarts it.
+restarts it. Apply our crash fixes from [Tools/iCTRL](Tools/iCTRL/README.md) before building it.
+
+**One Kairos across your iPhone and Mac (kairos-mesh).** Since 31 Oct the app has one Kairos: the big button, Siri
+"Talk to Kairos" and **More** all use the on-phone agent, and the Mac is reached over your private Tailscale network.
+- **Who thinks:** rules on the phone first. What they don't know goes to your chosen brain (Settings › Who thinks for
+  Kairos): **your Mac** (the kairos-mesh hub's open model, no API key; the default without a Gemini key) or Gemini.
+- **One conversation:** what you say here is added to the hub's conversation, so the Mac knows it; ask "what did I
+  ask on my Mac?" here and the hub's brain answers from the whole conversation.
+- **Your Mac can ask this iPhone** while Kairos is open. The request runs through `KairosAgent` here, exactly like
+  something you typed. Anything that calls, messages, pays, works another app, reads the screen or saves something
+  lasting **always** shows the card and needs Face ID here (`KairosAgent.remoteAlwaysConfirm`).
+- **To join:** install Tailscale on both with the same account. On the Mac run `kairos-mesh/scripts/kairos up`, then
+  `scripts/kairos pair` (or **Add a device** on the Mac page) and scan the QR code with the iPhone's Camera. Kairos
+  asks, then Face ID, and joins only if the Mac was really reached through Tailscale.
+- **The line under the title** says where your Mac is, in plain words (connected, Tailscale off, Mac asleep, Kairos
+  not running on the Mac). Tap it to try again.
+- **The old ElevenLabs Talk call** through tempo-hub is switched off (`kairos.legacy_voice` in UserDefaults turns it
+  back on); Siri and the on-phone voice replace it.
+- **Code:** `Agents/Mesh/MeshNode.swift`, `ContentView.swift`, `AgentSettings.brain` in `Agents/Core/ModelProvider.swift`.
 
 ## Checking it works
 

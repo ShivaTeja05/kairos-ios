@@ -6,6 +6,7 @@ import Foundation
 enum AgentDirectory {
     static var all: [any SpecialistAgent] {
         [
+            DevicesAgent(),     // "… on my Mac": hand the job to the person's Mac (kairos-mesh); first so the Mac wins
             WorkersAgent(),     // "create/assign/send an agent to <job>": a worker that goes and does it (Agents board)
             TrustAgent(),       // what agents may do without asking; "stop everything"
             PhotoAgent(),       // take a photo and post, send or upload it anywhere (Siri can't)

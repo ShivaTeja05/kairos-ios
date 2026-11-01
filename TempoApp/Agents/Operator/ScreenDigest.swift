@@ -32,6 +32,21 @@ struct ScreenElement: Sendable, Equatable {
     var midY: Double { y + h / 2 }
     var isTextInput: Bool { ScreenDigest.inputKinds.contains(kind) }
     var isSecure: Bool { kind == "SecureTextField" }
+    /// A box for searching, not for writing to someone: a search field, or a text box whose identifier says search or
+    /// whose label is "Search…" (WhatsApp's newer Chats search is a TextView "Search", id TokenizedSearchBar_TextView).
+    var isSearchBox: Bool {
+        guard isTextInput, !isSecure else { return false }
+        let name = label.folded
+        return kind == "SearchField" || ident.folded.contains("search") || name == "search" || name.hasPrefix("search ")
+            || name.hasSuffix(" or search")
+    }
+    /// A box a message is written in (WhatsApp's "Compose message", id ChatBar_ComposerTextView): a text view, or a
+    /// text field named for a message, that isn't a search box.
+    var isMessageBox: Bool {
+        guard !isSearchBox else { return false }
+        let words = (label + " " + ident).folded
+        return kind == "TextView" || (kind == "TextField" && (words.contains("message") || words.contains("compose")))
+    }
     var isActionable: Bool { ScreenDigest.actionableKinds.contains(kind) || fromOCR }
     /// What a person would read on it.
     var shownText: String {
@@ -179,11 +194,19 @@ struct ScreenDigest: Sendable {
         return out
     }
 
-    /// The thin-tree test iCTRL's own guide uses: few labelled things, or iCTRL recommends OCR.
+    /// The thin-tree test iCTRL's own guide uses: few labelled things, or iCTRL recommends OCR. Never on a screen
+    /// still blank after a second look (iCTRL: nearly one colour, nothing labelled): there is nothing to read yet,
+    /// and OCR takes about 2 s.
     static func needsOCR(_ reply: JSONValue, digest: ScreenDigest) -> Bool {
         if digest.usedOCR { return false }
+        if isBlank(reply) { return false }
         if reply["channel"]?["recommended"]?.string == "ocr" { return true }
         return digest.elements.count < 4
+    }
+
+    /// iCTRL says the page isn't drawn yet: loading, and the reason is a blank screen.
+    static func isBlank(_ reply: JSONValue) -> Bool {
+        reply["loading"]?.bool == true && reply["loading_reason"]?.string == "blank"
     }
 
     // MARK: - Looking things up
@@ -243,7 +266,7 @@ struct ScreenDigest: Sendable {
         // composer) keeps its newest, lowest rows; a list keeps its first ones.
         for e in elements where e.kind == "Alert" || e.kind == "NavigationBar" { keep.insert(e.index) }
         for e in elements where e.isActionable && e.kind != "Cell" && keep.count < budget { keep.insert(e.index) }
-        let chatLike = elements.contains { $0.kind == "TextView" }
+        let chatLike = elements.contains(where: \.isMessageBox)
         let rest = elements.filter { !keep.contains($0.index) }
         for e in (chatLike ? rest.reversed() : rest) where keep.count < budget { keep.insert(e.index) }
         return elements.map(\.index).filter { keep.contains($0) }

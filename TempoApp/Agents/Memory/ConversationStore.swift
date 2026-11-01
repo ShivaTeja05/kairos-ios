@@ -154,7 +154,9 @@ final class ConversationStore: ObservableObject {
         hadLines = true
         let fresh = lines.filter { !seen.contains($0.id) }
         seen = Set(lines.map(\.id))   // lines only ever drop off the front, so this stays small
-        for line in fresh {
+        // The self-test's dry runs aren't the person's conversations (nothing was done): never kept in their history
+        // or in what Kairos remembers. Each line says whether it came from one.
+        for line in fresh where !line.dryRun {
             record(Self.kind(line.kind), line.text, helper: line.helper, icon: line.icon, id: line.id)
         }
     }

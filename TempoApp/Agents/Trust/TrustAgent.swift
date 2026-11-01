@@ -226,7 +226,8 @@ struct TrustListTool: KairosTool {
 
 struct TrustActivityTool: KairosTool {
     let name = "recent_activity"
-    let summary = "Says what the owner's agents did on their own without asking, because the owner allowed it."
+    let summary = "Says what the owner's agents did on their own without asking, because the owner allowed it. Only "
+        + "what Kairos's own agents did: never calls, texts or emails the person received (read_screen reads those)."
     var parameters: JSONValue { Schema.none }
     let risk = Risk.read
 

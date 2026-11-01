@@ -12,3 +12,6 @@ DerivedData/
 # Local logs and backups
 *.log
 *.orig
+
+# Self-test results hold real contact names, memories and file paths from the phone and Mac
+Tools/SelfTest/results/

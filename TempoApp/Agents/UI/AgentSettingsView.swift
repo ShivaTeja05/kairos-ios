@@ -19,6 +19,12 @@ struct AgentSettingsView: View {
     @State private var speakReplies = AgentVoice.speakReplies
     @State private var listening: Bool? = AgentVoice.listeningAllowed
     @State private var abilities: [String: String] = [:]
+    @ObservedObject private var mesh = MeshNode.shared
+    @State private var meshHub = ""
+    @State private var meshCode = ""
+    @State private var meshNote: String?
+    @State private var meshJoining = false
+    @State private var brain = AgentSettings.brain
 
     static let models: [(id: String, label: String, note: String)] = [
         ("gemini-3.5-flash-lite", "Quick (recommended)", "Fast, and uses the least of your free allowance."),
@@ -36,8 +42,12 @@ struct AgentSettingsView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    keySection
-                    modelSection
+                    meshSection
+                    brainSection
+                    if brain == .gemini {
+                        keySection
+                        modelSection
+                    }
                     languageSection
                     voiceSection
                     privacyNote
@@ -363,9 +373,111 @@ struct AgentSettingsView: View {
         }
     }
 
+    // MARK: - Who thinks
+
+    private var brainSection: some View {
+        card("Who thinks for Kairos") {
+            Text("Alarms, reminders, calls and your calendar are done by rules on this phone. For everything else:")
+                .font(AgentUIStyle.font(18))
+                .foregroundStyle(AgentUIStyle.soft)
+                .fixedSize(horizontal: false, vertical: true)
+            bigButton("Your Mac: open model, no key", icon: brain == .mac ? "checkmark.circle.fill" : "laptopcomputer",
+                      filled: brain == .mac) {
+                brain = .mac
+                AgentSettings.brain = .mac
+            }
+            bigButton("Google Gemini: your key", icon: brain == .gemini ? "checkmark.circle.fill" : "sparkles",
+                      filled: brain == .gemini) {
+                brain = .gemini
+                AgentSettings.brain = .gemini
+            }
+            Text(brain == .mac
+                 ? "Your Mac's own model answers, over your private Tailscale network. Nothing goes to Google. Reading letters needs Gemini for now."
+                 : "Gemini answers here on the phone and can use all of Kairos's helpers. Needs a free key from Google.")
+                .font(AgentUIStyle.font(17))
+                .foregroundStyle(AgentUIStyle.soft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Your devices (kairos-mesh)
+
+    private var meshSection: some View {
+        card("Your Mac") {
+            Label(mesh.status == .ready && mesh.overTailscale ? "Connected to your Mac · private Tailscale link" : mesh.status.line,
+                  systemImage: mesh.isPaired ? "laptopcomputer.and.iphone" : "link")
+                .font(AgentUIStyle.font(20, .semibold))
+                .foregroundStyle(mesh.isPaired ? AgentUIStyle.green : AgentUIStyle.soft)
+                .fixedSize(horizontal: false, vertical: true)
+            if let note = mesh.note {
+                Text(note)
+                    .font(AgentUIStyle.font(17))
+                    .foregroundStyle(AgentUIStyle.soft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if mesh.isPaired {
+                if case .offline = mesh.status {
+                    bigButton("Try again", icon: "arrow.clockwise", filled: false) { mesh.retry() }
+                }
+                if let last = mesh.lastTask {
+                    Text("Last request: \(last)")
+                        .font(AgentUIStyle.font(17))
+                        .foregroundStyle(AgentUIStyle.soft)
+                        .lineLimit(2)
+                }
+                bigButton("Leave my devices", icon: "xmark.circle", filled: false, tint: AgentUIStyle.red) {
+                    mesh.leave()
+                }
+            } else {
+                Text("Easiest: on your Mac run kairos pair (or open Kairos there and tap Add a device), then point this iPhone's Camera at the code. Tailscale must be on, on both.")
+                    .font(AgentUIStyle.font(17))
+                    .foregroundStyle(AgentUIStyle.soft)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField("Mac's Tailscale name, e.g. mac.tail1234.ts.net", text: $meshHub)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .font(AgentUIStyle.font(20))
+                    .padding(12)
+                    .background(AgentUIStyle.paper, in: RoundedRectangle(cornerRadius: 14))
+                TextField("6-digit code from your Mac", text: $meshCode)
+                    .keyboardType(.numberPad)
+                    .font(AgentUIStyle.font(20))
+                    .padding(12)
+                    .background(AgentUIStyle.paper, in: RoundedRectangle(cornerRadius: 14))
+                bigButton(meshJoining ? "Joining…" : "Join", icon: "link.badge.plus", filled: true) {
+                    meshJoining = true
+                    Task {
+                        do {
+                            try await mesh.pair(hub: meshHub, code: meshCode)
+                            meshNote = "Joined. Kairos here and on your Mac now share one conversation."
+                        } catch {
+                            meshNote = MeshNode.problem(error, hub: MeshNode.hubURL(meshHub))
+                        }
+                        meshJoining = false
+                    }
+                }
+                .disabled(meshJoining)
+            }
+            if let meshNote {
+                Text(meshNote)
+                    .font(AgentUIStyle.font(18, .medium))
+                    .foregroundStyle(mesh.isPaired ? AgentUIStyle.green : AgentUIStyle.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("One Kairos across your iPhone and Mac: one conversation, over your private Tailscale network. Your Mac can ask this iPhone for help (your calendar, a reminder, a text) while Kairos is open. Anything that calls, messages or pays still needs Face ID here.")
+                .font(AgentUIStyle.font(17))
+                .foregroundStyle(AgentUIStyle.soft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var privacyNote: some View {
         Label {
-            Text("What you ask and photos of letters go to Google Gemini using your key. Contacts, reminders and your calendar stay on this phone.")
+            Text((brain == .gemini
+                 ? "What you ask and photos of letters go to Google Gemini using your key."
+                 : "What the rules here can't do goes to the open model on your own Mac, over your private Tailscale network. Nothing goes to Google.")
+                 + " When this iPhone has joined your Mac, what you ask Kairos and its answers are also kept in the one conversation on your Mac (what a letter or the screen said stays here). Your contacts, reminders and calendar themselves stay on this phone.")
                 .fixedSize(horizontal: false, vertical: true)
         } icon: {
             Image(systemName: "lock.shield")

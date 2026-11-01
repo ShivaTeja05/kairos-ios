@@ -50,15 +50,20 @@ enum AgentAppHooks {
         // Siri learns new routine and helper names.
         RoutineSiri.keepUpToDate { TempoShortcuts.updateAppShortcutParameters() }
         AgentLibrary.didChange = { TempoShortcuts.updateAppShortcutParameters() }
-        // Present mode speaks through the live ElevenLabs call when there is one.
-        if !(Presenter.shared.live is TempoVoiceBridge) { Presenter.shared.live = TempoVoiceBridge(session: session) }
+        // Present mode speaks through the live ElevenLabs call when there is one (the old Kairos only). Without it the
+        // show uses the phone's own voice and hands over to Kairos's microphone.
+        if !TempoSession.legacyVoice {
+            Presenter.shared.live = nil
+        } else if !(Presenter.shared.live is TempoVoiceBridge) {
+            Presenter.shared.live = TempoVoiceBridge(session: session)
+        }
         let host = KairosShowHost.shared
         host.startAgentMic = { AgentVoice.shared.micTapped() }
         host.bringToFront = { (try? await ICTRLHands.shared.activateApp(bundleID: Bundle.main.bundleIdentifier ?? "")) != nil }
         host.prepare = { [weak session] in
             // ElevenLabs explains the show (#10): start the call first if it isn't on, and let its greeting finish.
             // A call that can't connect in time is closed again, so the phone's own voice and mic work.
-            if ShowSettings.voiceMode != "device", let session, !session.isInCall {
+            if TempoSession.legacyVoice, ShowSettings.voiceMode != "device", let session, !session.isInCall {
                 session.startIfIdle()
                 let end = Date().addingTimeInterval(15)
                 var spoke = false

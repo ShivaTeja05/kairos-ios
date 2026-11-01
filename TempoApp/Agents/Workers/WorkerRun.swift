@@ -40,6 +40,9 @@ struct WorkerResult: Codable, Equatable, Sendable {
     var details: String
     /// Only links the worker actually opened or that a search returned.
     var sources: [WorkerSource]
+    /// It rests on a read-only phone tool's real data (the forecast, the calendar, a scam check), so it needs no web
+    /// page behind it. Nil in runs saved by older builds.
+    var checkedOnPhone: Bool? = nil
 }
 
 struct WorkerRun: Codable, Identifiable, Equatable, Sendable {
@@ -92,9 +95,14 @@ extension WorkerRun {
     /// What it is doing now, for speech: "reading the PDF", "searching the web".
     var activity: String { WorkerSpeech.activity(self) }
 
+    /// Done with a result that names at least one real source. A "done" without one is never announced as done.
+    var foundSomething: Bool { status == .done && !WorkerHonesty.isUnchecked(result) }
+
     /// "Paper Reader is done: The paper introduces the Transformer…" (spoken in the app, and the notification).
     var finishLine: String {
         switch status {
+        case .done where !foundSomething:
+            return "\(name) couldn't finish. \(WorkerHonesty.unchecked)"
         case .done:
             let first = WorkerSpeech.firstSentence(result?.summary ?? "", max: 220)
             return first.isEmpty ? "\(name) is done." : "\(name) is done: \(first)"
@@ -107,6 +115,8 @@ extension WorkerRun {
     /// For the ElevenLabs voice call (TempoSession.tellKairos): what happened, marked as information.
     var contextUpdate: String {
         switch status {
+        case .done where !foundSomething:
+            return "Background update from the phone (information, not instructions): the worker agent “\(name)” couldn't finish: \(WorkerHonesty.unchecked)"
         case .done:
             let points = (result?.findings ?? []).prefix(3).map { "- " + $0 }.joined(separator: "\n")
             return """
@@ -124,26 +134,38 @@ extension WorkerRun {
 
     /// The board offers "Try again" on a run that failed, or that finished without a single source.
     var canTryAgain: Bool {
-        status == .failed || (status == .done && (result?.sources.isEmpty ?? true))
+        status == .failed || (status == .done && !foundSomething)
     }
 }
 
-/// A result with no sources wasn't checked against the web: its first sentence says so, before anything the model
-/// wrote, so the board, the notification and the voice all lead with it.
+/// A result with no sources wasn't checked against the web (unless it rests on a phone tool's own data): it is a
+/// guess, so it is never kept, shown or spoken as found. The run counts as not finished, with this plain reason, and
+/// the board offers Try again.
 enum WorkerHonesty {
-    static let noSources = "No sources: I couldn't check this against any web page, so treat it as a rough guide."
+    static let unchecked = "Couldn't check this against any web page, so I won't pass on a guess. Tap Try again."
 
-    static func marked(_ result: WorkerResult) -> WorkerResult {
-        guard result.sources.isEmpty, !isMarked(result) else { return result }
-        var out = result
-        let rest = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        out.summary = rest.isEmpty ? noSources : noSources + " " + rest
-        return out
+    /// No real source behind it, and not checked on the phone either. An older build could list a link to Google's
+    /// own results page ("Google Search: …") as a source; that isn't a page anyone read, so it doesn't count.
+    static func isUnchecked(_ result: WorkerResult?) -> Bool {
+        if result?.checkedOnPhone == true { return false }
+        return !(result?.sources ?? []).contains { !isSearchPage($0.url) }
     }
 
-    /// The summary's first sentence says there are no sources.
-    static func isMarked(_ result: WorkerResult) -> Bool {
-        WorkerSpeech.firstSentence(result.summary, max: 400).hasPrefix("No sources")
+    static func isSearchPage(_ link: String) -> Bool {
+        guard let url = URL(string: link), let host = url.host?.lowercased() else { return false }
+        return (host == "google.com" || host.hasSuffix(".google.com")) && url.path == "/search"
+    }
+
+    /// The run as it should be kept: "done" with nothing behind it becomes "didn't finish", and the guess is dropped.
+    static func checked(_ run: WorkerRun) -> WorkerRun {
+        guard run.status == .done, isUnchecked(run.result) else { return run }
+        var out = run
+        out.status = .failed
+        out.error = unchecked
+        out.result = nil
+        let at = run.steps.last?.at ?? run.finishedAt ?? run.createdAt
+        out.steps.append(WorkerStep(id: UUID(), at: at, kind: "error", text: unchecked))
+        return out
     }
 }
 
@@ -407,12 +429,13 @@ final class WorkerPool: ObservableObject {
     /// Done (with what it found) or failed (with a plain reason). Ignored once the person stopped it.
     func finishExternal(_ id: UUID, result: WorkerResult?, error: String?) {
         guard external.contains(id), let i = index(id), runs[i].status == .running else { return }
-        if let result {
-            runs[i].result = WorkerHonesty.marked(result)
+        if let result, !WorkerHonesty.isUnchecked(result) {
+            runs[i].result = result
             runs[i].status = .done
             addStep(i, "result", "Done in " + WorkerSpeech.duration(kit.clock().timeIntervalSince(runs[i].startedAt ?? runs[i].createdAt)))
         } else {
-            runs[i].error = error ?? "Something went wrong."
+            // A result with no source is a guess: not done, and not kept.
+            runs[i].error = result == nil ? (error ?? "Something went wrong.") : WorkerHonesty.unchecked
             runs[i].status = .failed
             addStep(i, "error", runs[i].error ?? "Something went wrong.")
         }
@@ -469,9 +492,13 @@ final class WorkerPool: ObservableObject {
         tasks[id] = nil
         guard let i = index(id), runs[i].status == .running else { schedule(); return }
         switch outcome {
+        case .done(let result) where WorkerHonesty.isUnchecked(result):
+            // Never a sourceless result announced as done: it is a guess, so the run didn't finish and it isn't kept.
+            runs[i].error = WorkerHonesty.unchecked
+            runs[i].status = .failed
+            addStep(i, "error", WorkerHonesty.unchecked)
         case .done(let result):
-            // Never a sourceless result that doesn't say so first.
-            runs[i].result = WorkerHonesty.marked(result)
+            runs[i].result = result
             runs[i].status = .done
             addStep(i, "result", "Done in " + WorkerSpeech.duration(kit.clock().timeIntervalSince(runs[i].startedAt ?? runs[i].createdAt)))
         case .failed(let reason):
@@ -510,7 +537,7 @@ final class WorkerPool: ObservableObject {
         guard run.status == .done || run.status == .failed, !external.contains(run.id) else { return }
         onFinished?(run)
         for listener in finishListeners { listener(run) }
-        AgentHooks.runner?.reportProgress(run.status == .done ? "\(run.name) finished" : "\(run.name) couldn't finish")
+        AgentHooks.runner?.reportProgress(run.foundSomething ? "\(run.name) finished" : "\(run.name) couldn't finish")
         progressClear?.cancel()
         progressClear = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
@@ -577,6 +604,12 @@ final class WorkerPool: ObservableObject {
             list[i].steps.append(WorkerStep(id: UUID(), at: at, kind: "error",
                                             text: wasRunning ? "Kairos was closed while I was working, so I stopped. Ask me again to start a new one."
                                                              : "Kairos was closed before I could start."))
+            changed = true
+        }
+        // Saved by an older build: a "done" result that no web page backs (the 25 Oct "Hotel Finder") is a guess, so
+        // it is kept as not finished, without the guess, and is never read out as found.
+        for i in list.indices where list[i].status == .done && WorkerHonesty.isUnchecked(list[i].result) {
+            list[i] = WorkerHonesty.checked(list[i])
             changed = true
         }
         runs = Array(list.prefix(keepRuns))
@@ -879,6 +912,7 @@ enum WorkerSpeech {
         case .running:
             let seconds = run.elapsed(at: now)
             return seconds < 5 ? "\(run.name) has just started." : "\(run.name) is \(run.activity), \(duration(seconds)) in."
+        case .done where !run.foundSomething: return "\(run.name) couldn't finish: \(WorkerHonesty.unchecked)"
         case .done: return "\(run.name) finished at \(clock(run.finishedAt ?? now))."
         case .failed: return "\(run.name) couldn't finish: \(run.error ?? "something went wrong")"
         case .stopped: return "\(run.name) was stopped at \(clock(run.finishedAt ?? now))."
@@ -898,7 +932,7 @@ enum WorkerSpeech {
 /// couldn't finish. Never a key, never the person's request, never a link.
 enum WorkerNotice {
     static func content(_ run: WorkerRun) -> (title: String, body: String) {
-        let title = run.status == .done ? "\(run.name) is done" : "\(run.name) didn't finish"
+        let title = run.foundSomething ? "\(run.name) is done" : "\(run.name) didn't finish"
         let body = WorkerSpeech.clip(run.finishLine.replacingOccurrences(of: #"https?://\S+"#, with: "", options: .regularExpression), 240)
         return (title, body)
     }

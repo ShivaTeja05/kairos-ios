@@ -210,6 +210,15 @@ enum KairosIntentRunner {
     static func run(_ words: String, source: AgentSource, budget: TimeInterval = budget) async -> AgentOutcome? {
         let agent = KairosAgent.shared
         MemoryContext.install()
+        // An emergency never hears "I'm still busy": KairosAgent.handle says the 999 advice at once, without any tool or
+        // model, even while another request is still running.
+        if KairosAgent.isEmergencyRequest(words, source: source, hasImages: false) {
+            let was = ConversationStore.shared.currentSource
+            ConversationStore.shared.currentSource = .siri
+            let outcome = await agent.handle(words, source: source)
+            ConversationStore.shared.currentSource = was
+            return outcome
+        }
         let started = Date()
         while agent.working, Date().timeIntervalSince(started) < busyWait {
             try? await Task.sleep(nanoseconds: 200_000_000)

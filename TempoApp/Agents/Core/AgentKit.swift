@@ -22,6 +22,7 @@ enum AgentSource: String, Sendable {
     case siriBackground  // "Hey Siri, ask Kairos …", phone may be locked
     case siriForeground  // Siri opened Kairos
     case automation      // a Shortcuts automation reported something (untrusted text)
+    case remote          // a task from another of the person's own devices, through the Kairos hub (kairos-mesh)
 }
 
 /// Everything a tool may look at for one request.
@@ -166,21 +167,29 @@ enum ToolPicker {
                     "directions", "direction", "route", "how do i", "how can i", "how to", "shortcut*", "run my", "get to",
                     "way to", "take me", "bus", "buses", "train*", "walk*", "drive", "driving", "map", "maps", "near me",
                     "nearest", "setting*", "wifi", "wi fi", "bluetooth", "battery", "brightness", "louder", "quieter", "volume",
-                    "torch", "flashlight", "what time", "what day", "do not disturb", "font", "notification*", "~cold", "~hot",
-                    "~warm", "~wear", "~coat", "~where is", "~date", "~bigger", "~writing", "~bright"],
+                    "torch", "flashlight", "torchlight", "flash light", "batteries", "charging", "charged", "what time",
+                    "what day", "do not disturb", "font", "notification*", "~cold", "~hot", "~warm", "~wear", "~coat",
+                    "~where is", "~date", "~bigger", "~writing", "~bright"],
         "workers": researchWords,
         "research": researchWords,
         "routines": ["routine*", "shortcut for", "do my", "every morning", "every evening", "every night", "every day", "save that",
                      "save this", "bedtime", "run my"],
+        // Reading other apps too: a text back in Messages, a missed call in the Phone app's Recents, an email in Mail,
+        // a place saved in Maps, a photo already in Photos.
         "operator": ["whatsapp", "screen", "instagram", "facebook", "uber", "youtube", "spotify", "netflix", "in the app",
+                     "texted me", "text me back", "text back", "replied", "messaged me", "ringing me", "missed call*",
+                     "who rang", "who called", "who was calling", "email*", "inbox", "my mail", "in mail", "mail app",
+                     "anyone ring*", "anyone call*", "anybody ring*", "anybody call*", "google maps", "maps app", "in maps",
+                     "my photos", "photos app", "gallery", "camera roll",
                      "~open", "~app", "~apps", "~tap", "~type", "~scroll", "~press", "~button"],
         "photos": ["photo", "photos", "picture*", "pic", "pics", "selfie*", "camera", "post", "posting", "posted", "upload*",
                    "instagram", "facebook", "~share", "~send it"],
         "memory": ["remember*", "forget*", "forgot*", "note that", "keep in mind", "what did i tell", "what do you know",
                    "about me", "what did we talk", "we talked", "talked about", "~do you know", "~yesterday", "~last time"],
-        "trust": ["permission*", "allow*", "trust*", "without asking", "stop everything", "stop all", "what have you done",
-                  "what did you do", "~activity", "~let it"],
+        "trust": ["permission*", "allow*", "trust*", "without asking", "need to ask", "don t ask", "dont ask", "no need to ask",
+                  "stop everything", "stop all", "what have you done", "what did you do", "~activity", "~let it"],
         "studio": ["helper*", "persona*", "talk to", "back to kairos", "~buddy", "~assistant*", "~character*", "~share", "~import*"],
+        "devices": ["mac", "macs", "macbook*", "laptop*", "computer*", "my other device*"],
     ]
 
     /// Workers and the research team answer to the same words.

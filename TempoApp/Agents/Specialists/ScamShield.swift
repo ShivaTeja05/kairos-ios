@@ -322,6 +322,9 @@ enum ScamShieldRules {
             var rest = replacing(question, in: t, with: " ")
             rest = clean(rest).trimmingCharacters(in: CharacterSet(charactersIn: " \"'?!.,:;-"))
             rest = replacing(leadIn, in: rest, with: "").trimmingCharacters(in: CharacterSet(charactersIn: " \"'?!.,:;-"))
+            // "Is this text on my screen a scam?": the person's own question points at the screen and carries no
+            // message, so there is nothing here to check. The model reads the screen first (read_screen).
+            if pointsAtScreenOnly(rest, original: t) { return nil }
             if rest.split(separator: " ").count >= 5 { return ["text": .string(rest)] }
             if let doc = documents.last { return ["text": .string(doc)] }
             return [:]
@@ -331,6 +334,21 @@ enum ScamShieldRules {
             return ["text": .string(t)]
         }
         return nil
+    }
+
+    /// The screen, the phone or a notification, with no message of its own.
+    static let onScreen = rx(#"\b(?:on|in) (?:my|the) (?:screen|phone|iphone)\b|\bon screen\b|\b(?:this|that) (?:screen|notification|pop ?up)\b"#)
+
+    /// True when what's left of the question only points at the screen ("this text on my screen") and no message
+    /// was given in quotes or after a colon.
+    static func pointsAtScreenOnly(_ rest: String, original: String) -> Bool {
+        guard has(onScreen, rest), !original.contains(":"), !original.contains("\"") else { return false }
+        let pointing: Set<String> = ["is", "was", "this", "that", "the", "a", "an", "my", "on", "in", "screen", "phone",
+                                     "iphone", "text", "message", "email", "mail", "notification", "pop", "up", "popup",
+                                     "here", "now", "just", "right", "came", "come", "showing", "shown", "showed",
+                                     "i", "ve", "have", "got", "can", "you", "see", "look", "at", "what", "s", "it",
+                                     "one", "thing", "kairos", "please", "tell", "me", "if", "whether", "check"]
+        return rest.folded.split(separator: " ").allSatisfy { pointing.contains(String($0)) }
     }
 
     // MARK: Helpers
@@ -404,7 +422,7 @@ enum ScamShieldRules {
          ("familyWord", familyWord), ("newNumber", newNumber), ("moneyAsk", moneyAsk), ("oddPayment", oddPayment),
          ("parcelFee", parcelFee), ("confirmDetails", confirmDetails), ("threat", threat), ("accountAlarm", accountAlarm), ("reward", reward),
          ("investment", investment), ("officialWords", officialWords), ("ukMobile", ukMobile), ("link", link), ("bankWords", bankWords),
-         ("question", question), ("leadIn", leadIn), ("describesSomeone", describesSomeone),
+         ("question", question), ("leadIn", leadIn), ("describesSomeone", describesSomeone), ("onScreen", onScreen),
          ("yes", ScamShieldCall159Tool.yes), ("no", ScamShieldCall159Tool.no), ("call159", ScamShieldCall159Tool.explicit)]
     }
 
@@ -456,6 +474,11 @@ enum ScamShieldRules {
         check(quickMatch("Is this real?", documents: ["Your tax refund of £245 is waiting"])?.text("text") == "Your tax refund of £245 is waiting",
               "a bare question checks the last letter or message")
         check(quickMatch("I need to change my PIN right now", documents: []) == nil, "the person's own request is not checked as a scam")
+        check(quickMatch("is this text on my screen a scam?", documents: []) == nil,
+              "a question about the screen is not itself the message (the screen is read first)")
+        check(has(ScamShieldCall159Tool.explicit, "ring the fraud line for my bank please")
+              && has(ScamShieldCall159Tool.explicit, "ring my bank's fraud line")
+              && !has(ScamShieldCall159Tool.explicit, "what's the fraud line number?"), "asking to ring the fraud line rings 159")
         check(quickMatch("Set an alarm for 7 tomorrow morning", documents: []) == nil, "ordinary requests are left alone")
         check(has(ScamShieldCall159Tool.explicit, "ring my bank") && !has(planning, "ring my bank")
               && has(planning, "remind me to call my bank tomorrow"), "a reminder to ring the bank is left to the planner")
@@ -567,7 +590,9 @@ struct ScamShieldCall159Tool: KairosTool {
     }
     let risk = Risk.reachesPerson
 
-    static let explicit = ScamShieldRules.rx(#"\b(?:call|ring|phone|dial)\b.{0,20}\b159\b|^\s*159\s*$|\bstop scams\b|\b(?:call|ring|phone)\b (?:my|the) bank\b"#)
+    /// "Ring 159", "call my bank", "ring the fraud line for my bank", "phone my bank's fraud team". Not "what's the
+    /// fraud line number?" (no calling verb before it).
+    static let explicit = ScamShieldRules.rx(#"\b(?:call|ring|phone|dial)\b.{0,20}\b159\b|^\s*159\s*$|\bstop scams\b|\b(?:call|ring|phone)\b (?:my|the) bank\b|\b(?:call|ring|phone)\b (?:my |the )?(?:bank'?s? )?(?:fraud|scams?) (?:line|team|number|department)\b"#)
     static let yes = ScamShieldRules.rx(#"^(?:yes|yeah|yep|yup|ok|okay|go on|go ahead|do it|please|please do|sure|call them|ring them|call it|ring it|call 159|ring 159)\b"#)
     static let no = ScamShieldRules.rx(#"\b(?:no|not|don'?t|dont|cancel|stop|wait)\b"#)
 

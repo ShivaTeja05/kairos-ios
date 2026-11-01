@@ -41,6 +41,8 @@ targets:
         INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "Kairos puts your appointments in your calendar and tells you what's on each day."
         INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription: "Kairos puts the appointments you ask for in your calendar."
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Kairos listens to what you say and turns it into words, so it can help you. Where your phone can, this happens on the phone itself."
+        # kairos-mesh: the iPhone talks to the Kairos hub on the person's Mac over their Wi-Fi.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Kairos can reach your Mac on your own network when it is set up that way (usually it uses your private Tailscale network), so your devices can ask each other for help."
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
     info:

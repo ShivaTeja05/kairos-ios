@@ -44,8 +44,13 @@ struct AgentHomeView: View {
     @State private var cameraForPhoto = false
     @State private var typing = false
     @State private var typed = ""
-    @State private var hasKey = AgentSettings.hasKey
+    /// Kairos can think about more than its rules: a Gemini key when Gemini is the brain, or a joined Mac.
+    @State private var hasKey = AgentHomeView.canThink
     @FocusState private var typeFocused: Bool
+
+    private static var canThink: Bool {
+        AgentSettings.brain == .gemini ? AgentSettings.hasKey : MeshNode.shared.isPaired
+    }
 
     private var thinking: Bool { agent.working || voice.isAsking }
 
@@ -88,7 +93,7 @@ struct AgentHomeView: View {
         // Shown as a sheet: a stray swipe must not close it while a Yes/No card or a request is waiting.
         .interactiveDismissDisabled(agent.confirmation != nil || agent.working)
         .animation(.easeOut(duration: 0.2), value: agent.confirmation?.id)
-        .sheet(isPresented: $showSettings, onDismiss: { hasKey = AgentSettings.hasKey }) {
+        .sheet(isPresented: $showSettings, onDismiss: { hasKey = Self.canThink }) {
             AgentSettingsView()
         }
         .sheet(isPresented: $showTrust) { TrustSettingsView() }
@@ -168,7 +173,7 @@ struct AgentHomeView: View {
         }
         .onAppear {
             AgentAppHooks.screenAppeared()
-            hasKey = AgentSettings.hasKey
+            hasKey = Self.canThink
             resumeFromSiri()
             if agent.cameraRequested { agent.cameraRequested = false; openCamera(.camera, forPhoto: true) }
         }
@@ -280,7 +285,7 @@ struct AgentHomeView: View {
                     .font(.system(size: compact ? 20 : 24, weight: .semibold))
                     .foregroundStyle(AgentUIStyle.amber)
                 if compact {
-                    Text("No Gemini key yet")
+                    Text(AgentSettings.brain == .gemini ? "No Gemini key yet" : "Not joined to your Mac yet")
                         .font(AgentUIStyle.font(19, .medium))
                         .foregroundStyle(AgentUIStyle.ink)
                         .lineLimit(1)
@@ -293,7 +298,9 @@ struct AgentHomeView: View {
                         .fixedSize()
                 } else {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Add a Gemini key to turn on thinking. Alarms, timers and calls work without it.")
+                        Text(AgentSettings.brain == .gemini
+                             ? "Add a Gemini key to turn on thinking. Alarms, timers and calls work without it."
+                             : "Join your Mac to turn on thinking (its open model, no key). Alarms, timers and calls work without it.")
                             .font(AgentUIStyle.font(19, .medium))
                             .foregroundStyle(AgentUIStyle.ink)
                             .multilineTextAlignment(.leading)

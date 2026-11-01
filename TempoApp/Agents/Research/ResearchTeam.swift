@@ -8,7 +8,9 @@ import Foundation
 // (planner, 3 researchers, writer) inside 60 seconds; quick is 4. A researcher that fails or runs out of time is
 // left out, and if the planner or the writer fails, code fills in for them, so a slow minute still gives a report.
 // If every researcher is stopped by Google's limit, the run fails and says so: there is no report made up without
-// a search. Sources come only from Google's grounding metadata; the writer only ever sees their numbers and site names.
+// a search. An answer Google didn't back with a single web page counts as a researcher that found nothing (it is
+// only the model's own words). Sources come only from Google's grounding metadata; the writer only ever sees their
+// numbers and site names.
 
 enum ResearchDepth: String, Codable, Sendable, CaseIterable {
     case quick, normal
@@ -186,9 +188,16 @@ actor ResearchTeam {
                             try await mine.search(q.question, system: GroundedSearch.researcherSystem(number: q.number, today: now),
                                                   pacing: pacing)
                         }
+                        // Google answered but backed it with no web page: only the model's own words, so it isn't used.
+                        guard answer.grounded else {
+                            await progress(ResearchProgress(stage: .researcherFailed(q.number),
+                                                            text: "Researcher \(q.number)'s search came back without any web pages, so the others carry on."))
+                            return ResearcherOutcome(question: q, answer: nil, error: ResearchError.empty, startedAt: turn.startedAt ?? t0,
+                                                     finishedAt: Date().timeIntervalSince(started), sent: true, requests: answer.requests)
+                        }
                         let n = answer.sources.count
                         await progress(ResearchProgress(stage: .researcherDone(q.number),
-                                                        text: "Researcher \(q.number) found \(n == 0 ? "an answer" : n == 1 ? "1 source" : "\(n) sources")."))
+                                                        text: "Researcher \(q.number) found \(n == 1 ? "1 source" : "\(n) sources")."))
                         return ResearcherOutcome(question: q, answer: answer, error: nil, startedAt: turn.startedAt ?? t0,
                                                  finishedAt: Date().timeIntervalSince(started), sent: true)
                     } catch {
@@ -196,8 +205,11 @@ actor ResearchTeam {
                         let words: String
                         if research == .timedOut {
                             words = "Researcher \(q.number) ran out of time, so the others carry on."
-                        } else if research?.isSearchLimit == true {
+                        } else if research?.isGoogleLimit == true {
                             words = "Researcher \(q.number) couldn't search because of Google's search limit, so the others carry on."
+                        } else if case .busy? = research {
+                            // Our own turn-taking, not Google's limit.
+                            words = "Researcher \(q.number) didn't get a turn to search in time, so the others carry on."
                         } else {
                             words = "Researcher \(q.number) couldn't finish, so the others carry on."
                         }
@@ -213,22 +225,26 @@ actor ResearchTeam {
         }
         for o in outcomes {
             if let a = o.answer { requestsSent += a.requests }
-            else if o.sent { requestsSent += 1 }
+            else if o.sent { requestsSent += max(1, o.requests) }
         }
-        let found = outcomes.filter { $0.answer != nil }
-        // Nobody could search: say why (Google's limit, the key, the network) rather than write a report from nothing.
+        // Only answers Google backed with real web pages count as found.
+        let found = outcomes.filter { $0.answer?.grounded == true }
+        // Nobody found anything on the web: say why (Google's limit, the key, the network) rather than write a
+        // report from nothing.
         guard !found.isEmpty else { throw Self.teamFailure(outcomes.compactMap(\.error)) }
         if found.count < outcomes.count {
             let missing = outcomes.filter { $0.answer == nil }
-            let limited = missing.filter { ($0.error as? ResearchError)?.isSearchLimit == true }.map { "Researcher \($0.question.number)" }
-            let late = missing.filter { ($0.error as? ResearchError)?.isSearchLimit != true }.map { "Researcher \($0.question.number)" }
+            func named(_ list: [ResearcherOutcome]) -> [String] { list.map { "Researcher \($0.question.number)" } }
+            let limited = missing.filter { ($0.error as? ResearchError)?.isGoogleLimit == true }
+            let empty = missing.filter { ($0.error as? ResearchError) == .empty }
+            let late = missing.filter { ($0.error as? ResearchError)?.isGoogleLimit != true && ($0.error as? ResearchError) != .empty }
             if !limited.isEmpty {
-                notes.append("\(Self.list(limited)) couldn't search because of Google's search limit, so the report uses the others.")
+                notes.append("\(Self.list(named(limited))) couldn't search because of Google's search limit, so the report uses the others.")
             }
-            if !late.isEmpty { notes.append("\(Self.list(late)) didn't finish in time, so the report uses the others.") }
-        }
-        if found.allSatisfy({ $0.answer?.sources.isEmpty ?? true }) {
-            notes.append("None of the searches came back with a source, so treat this report as a rough guide.")
+            if !empty.isEmpty {
+                notes.append("\(Self.list(named(empty))) found no web pages, so the report uses the others.")
+            }
+            if !late.isEmpty { notes.append("\(Self.list(named(late))) didn't finish in time, so the report uses the others.") }
         }
         if let stoodIn = found.compactMap(\.answer).first(where: { $0.fallbackFrom != nil }), let chosen = stoodIn.fallbackFrom {
             notes.append("The chosen model (\(chosen)) can't search the web, so the researchers used \(stoodIn.model).")
@@ -299,6 +315,8 @@ actor ResearchTeam {
         var finishedAt: Double
         /// A request actually went to Google (not refused by the pacer first).
         var sent: Bool
+        /// Requests an answer that wasn't used took (an answer with no web pages).
+        var requests = 0
     }
 
     /// When a researcher's first request got its turn (the pacer tells it; it may happen on another task).

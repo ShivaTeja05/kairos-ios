@@ -217,8 +217,10 @@ final class AgentVoice: NSObject, ObservableObject {
         notice = nil
         isAsking = true
         // One request at a time: the camera can open while the request that asked for it is finishing.
+        // Never for an emergency: handle() answers that at once, whatever else is running.
+        let emergency = KairosAgent.isEmergencyRequest(words, source: .app, hasImages: !images.isEmpty)
         var waited = 0
-        while KairosAgent.shared.working, waited < 150 {
+        while !emergency, KairosAgent.shared.working, waited < 150 {
             try? await Task.sleep(nanoseconds: 200_000_000)
             waited += 1
         }

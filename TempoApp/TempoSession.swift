@@ -93,7 +93,13 @@ final class TempoSession: ObservableObject {
 
     func setCallMicMuted(_ muted: Bool) async { try? await conversation?.setMuted(muted) }
 
+    /// The old Kairos: this ElevenLabs call through the tempo-hub server. Off since Kairos became one agent across
+    /// the person's devices (the on-phone agent plus the kairos-mesh hub on their Mac). Kept, not deleted, until
+    /// after Nov 1: `defaults write` the key on a test build to bring the old screen back.
+    static var legacyVoice: Bool { UserDefaults.standard.bool(forKey: "kairos.legacy_voice") }
+
     func startIfIdle(auto: Bool = false) {
+        guard Self.legacyVoice else { return }
         if auto { guard !autoStarted else { return }; autoStarted = true }
         guard !starting, conversation == nil, phase == .idle || isError else { return }
         startTask = Task { await start() }

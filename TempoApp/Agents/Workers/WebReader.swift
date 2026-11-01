@@ -11,6 +11,10 @@ import PDFKit
 // arXiv API (https://info.arxiv.org/help/api/user-manual.html): GET export.arxiv.org/api/query with search_query or
 // id_list, Atom XML back (entry: id, title, summary, published, author/name, link rel=alternate (abs) and
 // link title=pdf). arXiv asks for one request every three seconds; ArxivPacer keeps to that.
+// Searching without a key (for when Google's search can't be used): GET html.duckduckgo.com/html/?q=…, DuckDuckGo's
+// plain results page. It gives links and short snippets only, never answers. One such search at a time from the
+// whole app, at least two seconds apart (KeylessPacer). A 202 reply or an "are you a robot?" page counts as no
+// results, and keyless searching then rests for ten minutes: the check is never solved.
 
 /// A page or PDF a worker read.
 struct FetchedPage: Sendable, Equatable {
@@ -107,6 +111,15 @@ struct ArxivPaper: Sendable, Equatable {
     }
 }
 
+/// One result from a search without a key: a link to read, not an answer.
+struct KeylessHit: Sendable, Equatable {
+    var title: String
+    /// The real page (DuckDuckGo's redirect taken off), already checked by WebReader.vet.
+    var url: String
+    /// A line or two from the page, as the search shows it (web text).
+    var snippet: String
+}
+
 enum WebReadError: LocalizedError, Equatable {
     case notAllowed(String)
     case tooBig
@@ -142,6 +155,9 @@ struct WebReader: Sendable {
     /// arXiv's API etiquette: one request every three seconds.
     var arxivSpacing: TimeInterval = 3
     var arxivPacer: ArxivPacer = .shared
+    /// Seconds between one keyless search ending and the next starting.
+    var keylessSpacing: TimeInterval = 2
+    var keylessPacer: KeylessPacer = .shared
     /// Tests return a configuration with their own URLProtocol.
     var configuration: @Sendable () -> URLSessionConfiguration = { URLSessionConfiguration.ephemeral }
     var userAgent = "Kairos/1.0 (iPhone worker agent reading for its owner)"
@@ -294,6 +310,42 @@ struct WebReader: Sendable {
         return Arxiv.parse(data)
     }
 
+    // MARK: Searching without a key
+
+    /// False while keyless searching is resting (DuckDuckGo asked us to slow down): no request would be sent.
+    func keylessAvailable() async -> Bool {
+        await !keylessPacer.isResting()
+    }
+
+    /// Up to 8 web results for `query` from DuckDuckGo's plain results page: links and snippets to read, not answers.
+    /// Waits its turn (one at a time, a little apart). A 202 reply, a refusal or an "are you a robot?" page gives no
+    /// results, and keyless searching rests for a while; the check is never solved. Throws only when the phone is
+    /// offline, the page took too long, or the search was cancelled.
+    func keylessSearch(_ query: String) async throws -> [KeylessHit] {
+        guard let url = KeylessSearch.url(query.trimmingCharacters(in: .whitespacesAndNewlines)) else { return [] }
+        guard try await keylessPacer.begin(spacing: keylessSpacing) else { return [] }
+        let reply: (Data, HTTPURLResponse, URL)
+        do {
+            reply = try await fetch(url, accept: "text/html,application/xhtml+xml")
+        } catch WebReadError.http(let code) {
+            // Refused (403, 429): DuckDuckGo wants a rest, so it is left alone for a while.
+            await keylessPacer.end(rest: code == 403 || code == 429 ? KeylessPacer.restAfterRefusal : 0)
+            return []
+        } catch {
+            await keylessPacer.end()
+            throw error
+        }
+        let (data, response, _) = reply
+        let html = Self.decode(data, encodingName: response.textEncodingName) ?? ""
+        // 202 is DuckDuckGo's "are you a robot?" reply; the same page can come with 200. No results, and a rest.
+        if response.statusCode != 200 || KeylessSearch.isChallenge(html) {
+            await keylessPacer.end(rest: KeylessPacer.restAfterRefusal)
+            return []
+        }
+        await keylessPacer.end()
+        return KeylessSearch.parse(html)
+    }
+
     // MARK: HTTP
 
     /// GET with the rules above. Returns the body, the response and the final URL after redirects.
@@ -434,6 +486,52 @@ actor ArxivPacer {
         next = slot.addingTimeInterval(spacing)
         let nap = slot.timeIntervalSince(now)
         if nap > 0 { try await Task.sleep(nanoseconds: UInt64(nap * 1_000_000_000)) }
+    }
+}
+
+/// Keeps keyless searching polite for the whole app: one search at a time, `spacing` seconds after the last one
+/// ended, and none at all for a while after DuckDuckGo refuses or asks "are you a robot?".
+actor KeylessPacer {
+    static let shared = KeylessPacer()
+    /// How long keyless searching rests after a refusal or a check (ten minutes).
+    static let restAfterRefusal: TimeInterval = 600
+    /// A search that never handed its turn back frees it after this long.
+    static let leaseTimeout: TimeInterval = 45
+
+    private var busySince: Date?
+    private var lastEnd: Date?
+    private var restUntil: Date?
+
+    func isResting() -> Bool {
+        guard let restUntil else { return false }
+        return restUntil > Date()
+    }
+
+    /// Waits for the turn and takes it (hand it back with `end`). False at once, without a turn, while resting.
+    func begin(spacing: TimeInterval) async throws -> Bool {
+        while true {
+            try Task.checkCancellation()
+            let now = Date()
+            if isResting() { return false }
+            if let since = busySince, now.timeIntervalSince(since) < Self.leaseTimeout {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                continue
+            }
+            let wait = lastEnd.map { spacing - now.timeIntervalSince($0) } ?? 0
+            if wait > 0 {
+                try await Task.sleep(nanoseconds: UInt64(min(wait, 1) * 1_000_000_000))
+                continue
+            }
+            busySince = now
+            return true
+        }
+    }
+
+    /// The search is over; `rest` > 0 stops keyless searching for that many seconds.
+    func end(rest: TimeInterval = 0) {
+        busySince = nil
+        lastEnd = Date()
+        if rest > 0 { restUntil = Date().addingTimeInterval(rest) }
     }
 }
 
@@ -584,6 +682,94 @@ final class ArxivAtomReader: NSObject, XMLParserDelegate {
             break
         }
         text = ""
+    }
+}
+
+// MARK: - DuckDuckGo's plain results page
+
+/// Reads https://html.duckduckgo.com/html/?q=…: each result's title link is `<a class="result__a"
+/// href="//duckduckgo.com/l/?uddg=<the real link, percent-encoded>&rut=…">`, and its snippet is the next
+/// `class="result__snippet"` element. Ads lead to duckduckgo.com/y.js?ad_domain=… and are left out.
+enum KeylessSearch {
+    static let maxResults = 8
+
+    private static let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+
+    static func url(_ query: String) -> URL? {
+        guard !query.isEmpty, let q = query.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+        return URL(string: "https://html.duckduckgo.com/html/?q=" + q)
+    }
+
+    /// DuckDuckGo's "are you a robot?" page instead of results.
+    static func isChallenge(_ html: String) -> Bool {
+        let lower = html.lowercased()
+        return ["anomaly-modal", "anomaly.js", "challenge-form", "bots use duckduckgo"].contains { lower.contains($0) }
+    }
+
+    private static func regex(_ pattern: String) -> NSRegularExpression? {
+        try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
+    }
+
+    private static let anchor = regex(#"<a\b([^>]*)>(.*?)</a\s*>"#)
+    private static let classes = regex(#"\bclass\s*=\s*"([^"]*)""#)
+    private static let href = regex(#"\bhref\s*=\s*"([^"]*)""#)
+    private static let snippet = regex(#"\bclass\s*=\s*"[^"]*\bresult__snippet\b[^"]*"[^>]*>(.*?)</(?:a|div|td|span)\s*>"#)
+
+    /// Up to 8 results, ads and DuckDuckGo's own links left out, each link one a worker may open.
+    static func parse(_ html: String) -> [KeylessHit] {
+        guard let anchor else { return [] }
+        let ns = html as NSString
+        var titles: [(range: NSRange, href: String, title: String)] = []
+        for m in anchor.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            let attributes = ns.substring(with: m.range(at: 1))
+            guard first(classes, in: attributes)?.split(separator: " ").contains("result__a") == true,
+                  let link = first(href, in: attributes) else { continue }
+            titles.append((m.range, link, ns.substring(with: m.range(at: 2))))
+        }
+        var hits: [KeylessHit] = []
+        var seen = Set<String>()
+        for (i, t) in titles.enumerated() {
+            guard let link = target(t.href), seen.insert(link).inserted else { continue }
+            let title = text(t.title)
+            guard !title.isEmpty else { continue }
+            // The snippet sits between this title and the next one.
+            let from = t.range.location + t.range.length
+            let to = i + 1 < titles.count ? titles[i + 1].range.location : ns.length
+            var words = ""
+            if let snippet, to > from, let m = snippet.firstMatch(in: html, range: NSRange(location: from, length: to - from)) {
+                words = text(ns.substring(with: m.range(at: 1)))
+            }
+            hits.append(KeylessHit(title: String(title.prefix(160)), url: link, snippet: String(words.prefix(400))))
+            if hits.count == maxResults { break }
+        }
+        return hits
+    }
+
+    /// The real link behind DuckDuckGo's redirect (its `uddg` parameter), or nil for an ad, DuckDuckGo's own pages,
+    /// or a link a worker may not open.
+    static func target(_ rawHref: String) -> String? {
+        var s = HTMLText.entities(rawHref).trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("//") { s = "https:" + s } else if s.hasPrefix("/") { s = "https://duckduckgo.com" + s }
+        guard let parts = URLComponents(string: s) else { return nil }
+        var link = s
+        if let host = parts.host?.lowercased(), host == "duckduckgo.com" || host.hasSuffix(".duckduckgo.com") {
+            guard let real = parts.queryItems?.first(where: { $0.name == "uddg" })?.value, !real.isEmpty else { return nil }
+            link = real
+        }
+        guard case .success(let url) = WebReader.vet(link), let host = url.host?.lowercased(),
+              host != "duckduckgo.com", !host.hasSuffix(".duckduckgo.com"),
+              !url.path.hasSuffix("/y.js"), !(url.query ?? "").contains("ad_domain") else { return nil }
+        return url.absoluteString
+    }
+
+    private static func first(_ regex: NSRegularExpression?, in s: String) -> String? {
+        let ns = s as NSString
+        guard let regex, let m = regex.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        return ns.substring(with: m.range(at: 1))
+    }
+
+    private static func text(_ html: String) -> String {
+        HTMLText.collapse(HTMLText.entities(HTMLText.strip(html))).replacingOccurrences(of: "\n", with: " ")
     }
 }
 

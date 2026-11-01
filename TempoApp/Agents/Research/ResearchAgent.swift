@@ -76,7 +76,8 @@ enum ResearchBoard {
         if !r.nextSteps.isEmpty { details += "### What you could do next\n" + r.nextSteps.map { "- " + $0 }.joined(separator: "\n") + "\n" }
         let result = WorkerResult(summary: r.summary, findings: findings, details: details,
                                   sources: r.sources.map { WorkerSource(title: $0.title, url: $0.url) })
-        WorkerPool.shared.externalStep(id, kind: "read", text: "Read \(r.sources.count) source\(r.sources.count == 1 ? "" : "s") from Google Search",
+        // What happened: Google cited these pages in its answers; the team itself opened none of them.
+        WorkerPool.shared.externalStep(id, kind: "search", text: "Google Search cited \(r.sources.count) source\(r.sources.count == 1 ? "" : "s")",
                                        modelCalls: r.requestCount)
         WorkerPool.shared.finishExternal(id, result: result, error: nil)
     }
@@ -207,6 +208,11 @@ struct ResearchTopicTool: KairosTool {
     }
 
     static func result(_ r: ResearchReport, saved: Bool) -> ToolResult {
+        // A report with no web page behind it is a guess: never read out as if it had been researched.
+        guard !r.isUnchecked else {
+            return ToolResult(ok: false, say: "The research team couldn't check anything on the web just now, so I won't pass on a guess. Shall I try again in a minute?",
+                              data: ["report_id": .string(r.id), "status": "no sources: nothing was checked"], isAnswer: true)
+        }
         let say = r.summary + (saved ? " I've saved the full report in Reports." : " I couldn't save the full report this time, sorry.")
         let finished = r.researchers.filter { $0.status == .done }.count
         let data: JSONValue = [
@@ -260,6 +266,19 @@ enum ResearchMatcher {
     /// Things another helper answers at once ("find out about the weather tomorrow" is the weather helper's job).
     private static let otherHelpers = #"^(?:the\s+)?(?:weather|forecast)\b"#
 
+    /// A second request after the topic: "… and while that's going set a timer for 20 minutes", "… then text my son",
+    /// "… and remind me at 6". The model makes both calls; the rules would bury it in the topic. Only doing words
+    /// count, so "… and how I apply for it" is still part of the topic.
+    private static let anotherRequest: NSRegularExpression? = try? NSRegularExpression(pattern:
+        #"\b(?:and|then|also|while\s+(?:that|it|they|you)(?:'s|'re|\s+is|\s+are)\s+(?:going|running|on|happening|working|busy|doing\s+that))\s*,?\s+"#
+        + #"(?:then\s+|also\s+|please\s+|can\s+you\s+|could\s+you\s+)*"#
+        + #"(?:remind\s+me|wake\s+me|set\s+(?:me\s+|up\s+)?(?:an?\s+|my\s+|the\s+)?(?:alarm|timer|reminder)s?"#
+        + #"|(?:text|message|call|ring|phone|email|e-mail|whatsapp)\s+(?:me|my|him|her|them|us|mum|mom|dad|(?-i:[A-Z])\w*)"#
+        + #"|send\s+(?:a|an|my|him|her|them|it|this|that|(?-i:[A-Z])\w*)|pay\s+(?:the|my|a|an|for|him|her|them|(?-i:[A-Z])\w*)"#
+        + #"|(?:put|add)\s+(?:it|that|this|them|my|an?|the)|(?:open|play|cancel|delete|start|book)\s+(?:my|the|a|an|some|me|it)"#
+        + #"|turn\s+(?:on|off|up|down))\b"#,
+        options: [.caseInsensitive])
+
     static func match(_ words: String) -> (topic: String, depth: ResearchDepth)? {
         let text = words.replacingOccurrences(of: "\u{2019}", with: "'")
             .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".?!")))
@@ -278,6 +297,7 @@ enum ResearchMatcher {
             }
         }
         topic = topic.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".?!,;:\"'“”")))
+        if let anotherRequest, anotherRequest.firstMatch(in: topic, range: NSRange(topic.startIndex..., in: topic)) != nil { return nil }
         let plain = topic.folded
         guard plain.count >= 2, !notTopics.contains(plain), !plain.hasPrefix("my "), !plain.hasPrefix("me "),
               !plain.hasPrefix("about my "), plain.range(of: otherHelpers, options: .regularExpression) == nil else { return nil }
@@ -320,6 +340,13 @@ struct AskAboutReportTool: KairosTool {
         let title = args.text("title")
         guard let report = await MainActor.run(body: { ResearchWiring.store.report(matching: title) }) else {
             return .fail("I haven't saved any research yet. Say “research” and a topic, and my team will look it up.")
+        }
+        // Saved by an older build with no web page behind it: never answered from as if it had been researched.
+        guard !report.isUnchecked else {
+            return ToolResult(ok: true, say: "Your report “\(report.title)” was never checked on the web, so I won't answer from it. Shall I research it again?",
+                              data: ["report_id": .string(report.id), "title": .string(report.title), "checked_on_the_web": false,
+                                     "note": "Nothing in this report was checked: don't guess. If they say yes, run research_topic again."],
+                              isAnswer: true)
         }
         guard let model = ctx.model ?? AgentSettings.provider(timeout: 20) else { return .fail(ResearchError.noKey.errorDescription ?? "") }
         let block = """
@@ -388,12 +415,13 @@ struct ListReportsTool: KairosTool {
             return ToolResult(ok: true, say: "You haven't got any reports yet. Say “research” and a topic, and my team will look it up.",
                               data: ["reports": []], isAnswer: true)
         }
-        let newest = all.prefix(3).map { "“\($0.title)” (\(Self.when($0.createdAt, ctx: ctx)))" }
+        // A report an older build saved with no web page behind it is listed as never checked.
+        let newest = all.prefix(3).map { "“\($0.title)” (\(Self.when($0.createdAt, ctx: ctx))\($0.isUnchecked ? ", never checked on the web" : ""))" }
         let say = (all.count == 1 ? "You have one saved report: " : "You have \(all.count) saved reports. The newest: ")
             + ResearchTeam.list(newest) + "."
         let data: JSONValue = ["reports": .array(all.prefix(10).map { r in
             ["title": .string(r.title), "topic": .string(r.topic), "when": .string(Self.when(r.createdAt, ctx: ctx)),
-             "sources": .number(Double(r.sources.count))]
+             "sources": .number(Double(r.isUnchecked ? 0 : r.sources.count)), "checked_on_the_web": .bool(!r.isUnchecked)]
         })]
         return ToolResult(ok: true, say: say, data: data, isAnswer: true)
     }
@@ -431,22 +459,24 @@ struct ShareReportTool: KairosTool {
     func execute(_ args: JSONValue, ctx: TurnContext) async throws -> ToolResult {
         let title = args.text("title")
         let canShow = ctx.canShowUI
-        let found = await MainActor.run { () -> (request: ReportShareRequest, shown: Bool)? in
+        let found = await MainActor.run { () -> (request: ReportShareRequest, shown: Bool, unchecked: Bool)? in
             let store = ResearchWiring.store
             guard let report = store.report(matching: title) else { return nil }
             if canShow {
                 store.requestShare(report)
-                if let request = store.shareRequest { return (request, true) }
+                if let request = store.shareRequest { return (request, true, report.isUnchecked) }
             }
-            return (ReportShareRequest(reportID: report.id, title: report.title, file: store.markdownURL(for: report)), false)
+            return (ReportShareRequest(reportID: report.id, title: report.title, file: store.markdownURL(for: report)), false, report.isUnchecked)
         }
         guard let found else {
             return .fail(title == nil ? "You haven't got any reports to share yet."
                                       : "I couldn't find a report about that. Say “my reports” to hear the list.")
         }
-        let say = found.shown
+        var say = found.shown
             ? "Here's your report “\(found.request.title)”. Choose who to send it to."
             : "Open Kairos, go to Reports and tap Share on “\(found.request.title)”."
+        // Saved by an older build with no web page behind it: the person is told before sending it on.
+        if found.unchecked { say += " Just so you know, that report was never checked on the web." }
         // No UIRequest.share case in the core yet: the store's shareRequest drives the sheet (ReportsView.swift).
         return ToolResult(ok: true, say: say,
                           data: ["title": .string(found.request.title), "file_path": .string(found.request.file.path),

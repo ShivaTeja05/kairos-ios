@@ -1,9 +1,12 @@
 import AppIntents
 import SwiftUI
 
-// Kairos for iPhone (the assistant formerly called Tempo; internals keep the tempo name): one big button, voice first. ElevenLabs live voice in front; the user's own Mac
-// (local model + Tempo hub + phone/laptop agents) behind it. Opened by Siri ("Talk to Kairos"), Back Tap
-// (Settings > Accessibility > Touch > Back Tap > Talk to Kairos), the Home Screen, or kairos://talk.
+// Kairos for iPhone (the assistant formerly called Tempo; internals keep the tempo name): one big button, voice first.
+// ONE Kairos: the on-phone agent (KairosAgent + AgentVoice) behind the button, and the person's Mac behind it over
+// their private Tailscale network (kairos-mesh: the shared conversation, the open model, the Mac's own hands).
+// The old ElevenLabs call through tempo-hub (TempoSession) stays off unless TempoSession.legacyVoice.
+// Opened by Siri ("Talk to Kairos"), Back Tap (Settings > Accessibility > Touch > Back Tap > Talk to Kairos), the
+// Home Screen, or kairos://talk.
 
 extension Notification.Name {
     static let tempoStart = Notification.Name("tempo.start")
@@ -23,20 +26,35 @@ struct TempoMain: App {
         WindowGroup {
             ContentView()
                 .environmentObject(session)
-                .onOpenURL { url in AgentAppHooks.handle(url); session.handle(url: url) }
-                .onReceive(NotificationCenter.default.publisher(for: .tempoStart)) { _ in session.startIfIdle() }
+                .onOpenURL { url in
+                    // kairos://mesh?hub=…&code=… joins this iPhone to the person's other devices (kairos-mesh).
+                    if MeshNode.shared.handle(url) { return }
+                    AgentAppHooks.handle(url)
+                    guard !TempoSession.legacyVoice else { session.handle(url: url); return }
+                    guard url.scheme == "kairos" || url.scheme == "tempo" else { return }
+                    if url.host == "talk" { TalkLaunch.listen() }
+                    if url.host == "letter" { ContentView.readLetter() }
+                }
+                // Siri "Talk to Kairos": start listening (never toggle, so a second Siri can't stop it).
+                .onReceive(NotificationCenter.default.publisher(for: .tempoStart)) { _ in
+                    if TempoSession.legacyVoice { session.startIfIdle() } else if TalkLaunch.consume() { TalkLaunch.listen() }
+                }
                 // The on-phone helpers' screen is opening (Siri, kairos://agent): end a voice call so the mic is free.
                 .onReceive(NotificationCenter.default.publisher(for: .kairosAgentOpen)) { _ in
                     if [.connecting, .listening, .speaking, .thinking].contains(session.phase) { Task { await session.stop() } }
                 }
                 .onChange(of: phase) { _, newPhase in
-                    // Opening Kairos means "I want to talk": start listening straight away (older users),
-                    // unless the on-phone helpers' screen has the mic or a Siri request is waiting there.
+                    // The old Kairos started its call on every open; the one Kairos never opens the mic without a tap.
                     if newPhase == .active {
-                        if AgentAppHooks.allowsVoiceAutoStart { session.startIfIdle(auto: true) }
-                        session.startLocalWatch()
+                        if TempoSession.legacyVoice {
+                            if AgentAppHooks.allowsVoiceAutoStart { session.startIfIdle(auto: true) }
+                            session.startLocalWatch()
+                        } else if TalkLaunch.consume() {
+                            TalkLaunch.listen()   // Siri opened Kairos before the notification could be heard
+                        }
+                        MeshNode.shared.start()   // other devices can ask this iPhone while Kairos is open
                     }
-                    if newPhase == .background { session.stopLocalWatch() }
+                    if newPhase == .background { session.stopLocalWatch(); MeshNode.shared.stop() }
                 }
         }
     }
@@ -52,8 +70,26 @@ struct TalkToTempo: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        TalkLaunch.wanted = true
         NotificationCenter.default.post(name: .tempoStart, object: nil)
         return .result()
+    }
+}
+
+/// "Talk to Kairos" asked before the app could listen (a cold launch): remembered until Kairos is in front.
+@MainActor
+enum TalkLaunch {
+    static var wanted = false
+
+    static func consume() -> Bool {
+        defer { wanted = false }
+        return wanted
+    }
+
+    /// Listen now: stop Kairos talking first, then open the mic (never a toggle).
+    static func listen() {
+        AgentVoice.shared.stopSpeaking()
+        Task { await AgentVoice.shared.startListening() }
     }
 }
 
