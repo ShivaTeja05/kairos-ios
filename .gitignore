@@ -1,17 +1,2 @@
-Config/Local.xcconfig
-*.xcodeproj/
-build/
-.build/
-# Staging folders used while building features in parallel; their code is merged into TempoApp/Agents.
-AgentsWIP*/
-# Xcode and macOS clutter
-xcuserdata/
-DerivedData/
-*.xcresult
+# macOS clutter. Each part keeps its own rules: kairos-ios/.gitignore and kairos-mesh/.gitignore.
 .DS_Store
-# Local logs and backups
-*.log
-*.orig
-
-# Self-test results hold real contact names, memories and file paths from the phone and Mac
-Tools/SelfTest/results/
