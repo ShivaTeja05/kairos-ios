@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run Kairos's self-test on the real iPhone with a set of cases, and bring the results back.
 
+    cd kairos-ios
+    export KAIROS_DEVICE=<id from: xcrun devicectl list devices>  KAIROS_BUNDLE=<your build's bundle id>
     python3 -I Tools/SelfTest/run_selftest.py Tools/SelfTest/cases.json --out Tools/SelfTest/results
 
 1. Copies the cases onto the phone (Documents/kairos-selftest-cases.json in Kairos's container).
@@ -24,8 +26,9 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-DEVICE = os.environ.get("KAIROS_DEVICE", "41B1B15C-AAB1-5D64-914E-534DF7FADB59")
-BUNDLE = os.environ.get("KAIROS_BUNDLE", "uk.oxhack.tempo.6q9wsfp48t")
+# Your iPhone and your build: the bundle id ends with your team id, which this repo keeps out of git.
+DEVICE = os.environ.get("KAIROS_DEVICE", "")
+BUNDLE = os.environ.get("KAIROS_BUNDLE", "")
 ENV = {**os.environ, "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer"}
 
 
@@ -108,6 +111,8 @@ def main() -> None:
     ap.add_argument("--timeout", type=float, default=3600, help="seconds to wait for the run")
     ap.add_argument("--report-only", action="store_true", help="just pull and print the latest results")
     a = ap.parse_args()
+    if not DEVICE or not BUNDLE:
+        sys.exit("Set KAIROS_DEVICE (from: xcrun devicectl list devices) and KAIROS_BUNDLE (your build's bundle id).")
     a.out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = a.out / f"selftest-{stamp}.json"
