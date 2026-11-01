@@ -1,0 +1,6 @@
+#!/bin/bash
+# kairos: start, check and stop Kairos on this Mac (up | status | down | pair | install | uninstall).
+# The work is in mesh/ctl.py; this only finds the repo (even through a symlink) and runs it with the repo's Python.
+REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+cd "$REPO" || exit 1
+exec "$REPO/.venv/bin/python" -m mesh.ctl "$@"
