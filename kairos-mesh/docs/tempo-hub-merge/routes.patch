@@ -1,0 +1,81 @@
+49c49
+< from . import adapters, db, memory, model
+---
+> from . import adapters, db, memory, model, nodes
+345,346c345,346
+< TUNNEL_PATHS = {"/api/me", "/api/ask", "/api/voice/session", "/api/consents"}
+< TUNNEL_PREFIXES = ("/api/bridge/",)
+---
+> TUNNEL_PATHS = {"/api/me", "/api/ask", "/api/voice/session", "/api/consents", "/api/nodes"}
+> TUNNEL_PREFIXES = ("/api/bridge/", "/api/nodes/")  # nodes: the phone takes tasks and asks other devices from anywhere
+1174a1175,1181
+> 
+> 
+> # ---------- nodes: any device asks any other device (hub/nodes.py) ----------
+> 
+> class NodeAnnounceIn(BaseModel):
+>     agent: str | None = Field(default=None, max_length=80)  # e.g. "Kairos for iPhone", "Kairos node (macOS)"
+>     skills: list[dict] = Field(default_factory=list, max_length=200)  # [{name, summary}]
+1176a1184,1245
+> class NodeTaskIn(BaseModel):
+>     to: str = Field(min_length=1, max_length=120)  # the node's device id or its name
+>     words: str = Field(min_length=1, max_length=nodes.MAX_WORDS)
+>     wait: float = Field(default=0, ge=0, le=nodes.MAX_WAIT)  # hold the request until the answer, up to this long
+>     expires_in: float = Field(default=300, ge=30, le=3600)
+> 
+> 
+> class NodeResultIn(BaseModel):
+>     status: Literal["done", "refused", "failed"]
+>     answer: str = Field(default="", max_length=nodes.MAX_ANSWER)
+>     steps: list[str] = Field(default_factory=list, max_length=20)
+> 
+> 
+> def _node_call(fn, *args, **kwargs):
+>     try:
+>         return fn(*args, **kwargs)
+>     except nodes.NodeError as e:
+>         raise HTTPException(e.status, str(e))
+> 
+> 
+> def _node_log(dev: dict, kind: str, payload: dict) -> None:
+>     _hub_event(dev, kind, payload, private=True)
+> 
+> 
+> @app.post("/api/nodes/announce")
+> def node_announce(body: NodeAnnounceIn, dev: dict = Depends(current_device)):
+>     return _node_call(nodes.announce, dev, body.agent, body.skills)
+> 
+> 
+> @app.get("/api/nodes")
+> def node_list(dev: dict = Depends(current_device)):
+>     return {"nodes": nodes.list_nodes(dev["person_id"], dev["id"]), "you": dev["id"]}
+> 
+> 
+> @app.post("/api/nodes/tasks")
+> def node_submit(body: NodeTaskIn, dev: dict = Depends(current_device)):
+>     task = _node_call(nodes.submit, dev, body.to, body.words, body.expires_in, _node_log)
+>     if body.wait:
+>         task = _node_call(nodes.get, dev, task["id"], body.wait) | {"target_online": task["target_online"]}
+>     return task
+> 
+> 
+> @app.get("/api/nodes/tasks")
+> def node_recent(limit: int = 20, dev: dict = Depends(current_device)):
+>     return {"tasks": nodes.recent(dev, limit)}
+> 
+> 
+> @app.get("/api/nodes/tasks/next")
+> def node_next(wait: float = 0, dev: dict = Depends(current_device)):
+>     return {"task": _node_call(nodes.next_task, dev, wait)}
+> 
+> 
+> @app.post("/api/nodes/tasks/{task_id}/result")
+> def node_result(task_id: str, body: NodeResultIn, dev: dict = Depends(current_device)):
+>     return _node_call(nodes.finish, dev, task_id, body.status, body.answer, body.steps, _node_log)
+> 
+> 
+> @app.get("/api/nodes/tasks/{task_id}")
+> def node_task(task_id: str, wait: float = 0, dev: dict = Depends(current_device)):
+>     return _node_call(nodes.get, dev, task_id, wait)
+> 
+> 

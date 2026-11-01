@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="575" viewBox="0 0 680 575" role="img">
+<title>Kairos setup as it runs today</title>
+<desc>The iPhone runs the Kairos app, its agents and the iCTRL runner, and uses Gemini as its brain. The MacBook runs the voice server, conductor, hands agents, Guardian, Ollama and the Tempo hub, reached from the internet through an ngrok tunnel that ElevenLabs also uses. Other devices push their data into the hub.</desc>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.ts{font-size:12px;fill:#5F5E5A}.th{font-size:14px;font-weight:500;fill:#2C2C2A}
+.box{fill:#FAFAF7;stroke:#B4B2A9}.arr{stroke:#73726c;stroke-width:1.5;fill:none}
+.c-teal rect,rect.c-teal{fill:#E1F5EE;stroke:#0F6E56}.c-teal .th{fill:#085041}.c-teal .ts{fill:#0F6E56}
+.c-coral rect,rect.c-coral{fill:#FAECE7;stroke:#993C1D}.c-coral .th{fill:#712B13}.c-coral .ts{fill:#993C1D}
+.c-gray rect,rect.c-gray{fill:#F1EFE8;stroke:#888780}.c-gray .th{fill:#444441}
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#73726c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect width="680" height="575" fill="#ffffff"/>
+<g class="c-coral"><rect x="40" y="30" width="180" height="56" rx="8" stroke-width="0.5"/><text class="th" x="130" y="48" text-anchor="middle" dominant-baseline="central">Gemini API</text><text class="ts" x="130" y="68" text-anchor="middle" dominant-baseline="central">The iPhone's brain</text></g>
+<g class="c-coral"><rect x="250" y="30" width="180" height="56" rx="8" stroke-width="0.5"/><text class="th" x="340" y="48" text-anchor="middle" dominant-baseline="central">ngrok tunnel</text><text class="ts" x="340" y="68" text-anchor="middle" dominant-baseline="central">Public HTTPS address</text></g>
+<g class="c-coral"><rect x="460" y="30" width="180" height="56" rx="8" stroke-width="0.5"/><text class="th" x="550" y="48" text-anchor="middle" dominant-baseline="central">ElevenLabs</text><text class="ts" x="550" y="68" text-anchor="middle" dominant-baseline="central">Voice calls (Talk)</text></g>
+<g class="c-gray"><rect x="30" y="120" width="230" height="300" rx="16" stroke-width="0.5"/><text class="th" x="50" y="142" dominant-baseline="central">iPhone 12 Pro Max</text></g>
+<g class="c-gray"><rect x="290" y="120" width="360" height="300" rx="16" stroke-width="0.5"/><text class="th" x="310" y="142" dominant-baseline="central">MacBook Pro (M3 Pro)</text></g>
+<g class="c-teal"><rect x="50" y="160" width="190" height="56" rx="8" stroke-width="0.5"/><text class="th" x="145" y="178" text-anchor="middle" dominant-baseline="central">Kairos app</text><text class="ts" x="145" y="198" text-anchor="middle" dominant-baseline="central">Siri, typing, Talk</text></g>
+<g class="c-teal"><rect x="50" y="240" width="190" height="56" rx="8" stroke-width="0.5"/><text class="th" x="145" y="258" text-anchor="middle" dominant-baseline="central">Agents + 57 tools</text><text class="ts" x="145" y="278" text-anchor="middle" dominant-baseline="central">SafetyGate, Face ID</text></g>
+<g class="c-teal"><rect x="50" y="320" width="190" height="56" rx="8" stroke-width="0.5"/><text class="th" x="145" y="338" text-anchor="middle" dominant-baseline="central">iCTRL runner :8200</text><text class="ts" x="145" y="358" text-anchor="middle" dominant-baseline="central">Taps other apps</text></g>
+<g class="c-teal"><rect x="305" y="160" width="155" height="56" rx="8" stroke-width="0.5"/><text class="th" x="382" y="178" text-anchor="middle" dominant-baseline="central">Voice :8788</text><text class="ts" x="382" y="198" text-anchor="middle" dominant-baseline="central">Talk page, tasks</text></g>
+<g class="c-teal"><rect x="305" y="240" width="155" height="56" rx="8" stroke-width="0.5"/><text class="th" x="382" y="258" text-anchor="middle" dominant-baseline="central">Conductor</text><text class="ts" x="382" y="278" text-anchor="middle" dominant-baseline="central">Up to 5 agents</text></g>
+<g class="c-teal"><rect x="305" y="320" width="155" height="56" rx="8" stroke-width="0.5"/><text class="th" x="382" y="338" text-anchor="middle" dominant-baseline="central">Hands agents</text><text class="ts" x="382" y="358" text-anchor="middle" dominant-baseline="central">Laptop and phone</text></g>
+<g class="c-teal"><rect x="480" y="160" width="155" height="56" rx="8" stroke-width="0.5"/><text class="th" x="557" y="178" text-anchor="middle" dominant-baseline="central">Guardian</text><text class="ts" x="557" y="198" text-anchor="middle" dominant-baseline="central">Vault, watchers</text></g>
+<g class="c-teal"><rect x="480" y="240" width="155" height="56" rx="8" stroke-width="0.5"/><text class="th" x="557" y="258" text-anchor="middle" dominant-baseline="central">Ollama :11434</text><text class="ts" x="557" y="278" text-anchor="middle" dominant-baseline="central">qwen2.5:7b, local</text></g>
+<g class="c-teal"><rect x="480" y="320" width="155" height="56" rx="8" stroke-width="0.5"/><text class="th" x="557" y="338" text-anchor="middle" dominant-baseline="central">Tempo hub :8787</text><text class="ts" x="557" y="358" text-anchor="middle" dominant-baseline="central">Devices, events</text></g>
+<line x1="110" y1="158" x2="110" y2="90" class="arr" marker-end="url(#arrow)"/>
+<line x1="230" y1="158" x2="288" y2="90" class="arr" marker-end="url(#arrow)"/>
+<line x1="458" y1="58" x2="432" y2="58" class="arr" marker-end="url(#arrow)"/>
+<line x1="382" y1="88" x2="382" y2="158" class="arr" marker-end="url(#arrow)"/>
+<line x1="145" y1="218" x2="145" y2="238" class="arr" marker-end="url(#arrow)"/>
+<line x1="145" y1="298" x2="145" y2="318" class="arr" marker-end="url(#arrow)"/>
+<line x1="382" y1="218" x2="382" y2="238" class="arr" marker-end="url(#arrow)"/>
+<line x1="382" y1="298" x2="382" y2="318" class="arr" marker-end="url(#arrow)"/>
+<line x1="303" y1="348" x2="242" y2="348" class="arr" marker-end="url(#arrow)"/>
+<line x1="462" y1="282" x2="478" y2="326" class="arr" marker-end="url(#arrow)"/>
+<line x1="557" y1="318" x2="557" y2="298" class="arr" marker-end="url(#arrow)"/>
+<g><rect class="box" x="30" y="460" width="140" height="56" rx="8" stroke-width="0.5"/><text class="th" x="100" y="478" text-anchor="middle" dominant-baseline="central">Apple Watch</text><text class="ts" x="100" y="498" text-anchor="middle" dominant-baseline="central">Apple Health app</text></g>
+<g><rect class="box" x="190" y="460" width="140" height="56" rx="8" stroke-width="0.5"/><text class="th" x="260" y="478" text-anchor="middle" dominant-baseline="central">Android</text><text class="ts" x="260" y="498" text-anchor="middle" dominant-baseline="central">Health Connect</text></g>
+<g><rect class="box" x="350" y="460" width="140" height="56" rx="8" stroke-width="0.5"/><text class="th" x="420" y="478" text-anchor="middle" dominant-baseline="central">Windows, Linux</text><text class="ts" x="420" y="498" text-anchor="middle" dominant-baseline="central">Desktop agent</text></g>
+<g><rect class="box" x="510" y="460" width="140" height="56" rx="8" stroke-width="0.5"/><text class="th" x="580" y="478" text-anchor="middle" dominant-baseline="central">Any browser</text><text class="ts" x="580" y="498" text-anchor="middle" dominant-baseline="central">Hub web page</text></g>
+<path d="M100 458 L100 440 L580 440 L580 458" fill="none" stroke="#888780" stroke-width="0.8"/>
+<line x1="260" y1="458" x2="260" y2="440" stroke="#888780" stroke-width="0.8"/>
+<line x1="420" y1="458" x2="420" y2="440" stroke="#888780" stroke-width="0.8"/>
+<line x1="557" y1="440" x2="557" y2="380" class="arr" marker-end="url(#arrow)"/>
+<rect class="c-teal" x="150" y="544" width="16" height="12" rx="3" stroke-width="0.5"/>
+<text class="ts" x="174" y="550" dominant-baseline="central">Your code</text>
+<rect class="c-coral" x="270" y="544" width="16" height="12" rx="3" stroke-width="0.5"/>
+<text class="ts" x="294" y="550" dominant-baseline="central">Cloud, needs a key</text>
+<rect class="box" x="430" y="544" width="16" height="12" rx="3" stroke-width="0.5"/>
+<text class="ts" x="454" y="550" dominant-baseline="central">Sends data to hub</text>
+</svg>
