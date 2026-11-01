@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kairos Jarvis</title>
+<style>
+:root{--bg:#fafaf8;--card:#ffffff;--text:#1f1f1d;--muted:#6b6a65;--line:#e4e2db;--accent:#0f6e56;--accent-bg:#e1f5ee;--warn:#854f0b;--warn-bg:#faeeda;--bad:#a32d2d;--bad-bg:#fcebeb;--me:#eeedfe;--me-text:#3c3489}
+@media (prefers-color-scheme:dark){:root{--bg:#1b1b1a;--card:#242422;--text:#ecebe6;--muted:#a3a29b;--line:#3a3936;--accent:#5dcaa5;--accent-bg:#0b3a2f;--warn:#fac775;--warn-bg:#3d2a0c;--bad:#f09595;--bad-bg:#3d1717;--me:#2c2862;--me-text:#cecbf6}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+header{display:flex;align-items:baseline;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line)}
+header h1{font-size:18px;font-weight:600;margin:0}
+header .here{color:var(--muted);font-size:13px}
+main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;padding:16px 20px;max-width:1200px;margin:0 auto}
+@media (max-width:820px){main{grid-template-columns:1fr}}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+h2{font-size:13px;font-weight:600;text-transform:none;color:var(--muted);margin:0 0 10px}
+#turns{display:flex;flex-direction:column;gap:10px;max-height:58vh;overflow-y:auto;padding-right:4px}
+.turn{max-width:85%;padding:8px 12px;border-radius:12px;background:var(--accent-bg)}
+.turn.user{align-self:flex-end;background:var(--me);color:var(--me-text)}
+.turn .meta{font-size:11px;color:var(--muted);margin-bottom:2px}
+.turn.user .meta{color:inherit;opacity:.75}
+form{display:flex;gap:8px;margin-top:12px}
+input[type=text]{flex:1;font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+button{font:inherit;padding:9px 14px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text);cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:13px;color:var(--muted)}
+.device{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
+.device:last-child{border-bottom:0}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--line)}
+.dot.on{background:var(--accent)}
+.small{font-size:12px;color:var(--muted)}
+.task{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px}
+.status{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--line);white-space:nowrap}
+.status.completed{background:var(--accent-bg);color:var(--accent)}
+.status.working,.status.submitted{background:var(--warn-bg);color:var(--warn)}
+.status.input-required{background:var(--warn-bg);color:var(--warn);font-weight:600}
+.status.failed,.status.rejected,.status.expired,.status.canceled{background:var(--bad-bg);color:var(--bad)}
+.code{font:600 28px/1.2 ui-monospace,Menlo,monospace;letter-spacing:4px}
+#paircode:not(:empty){margin-top:10px;display:flex;flex-direction:column;gap:6px}
+.qr svg{display:block;border-radius:8px}
+.link{word-break:break-all;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--muted)}
+#err{color:var(--bad);font-size:13px;min-height:1em;margin-top:6px}
+</style>
+</head>
+<body>
+<header><h1>Kairos</h1><span class="here" id="here">connecting…</span></header>
+<main>
+  <section>
+    <h2>One conversation, every device</h2>
+    <div id="turns" aria-live="polite"></div>
+    <form id="ask">
+      <input type="text" id="text" placeholder="Ask anything, e.g. what's on my iPhone calendar tomorrow?" autocomplete="off">
+      <button type="button" id="mic" title="Speak" aria-label="Speak">🎤</button>
+      <button class="primary" id="send">Send</button>
+    </form>
+    <div id="err"></div>
+    <div class="row"><label><input type="checkbox" id="speak"> Speak answers</label><span id="thinking"></span></div>
+  </section>
+  <div>
+    <section>
+      <h2>Your devices</h2>
+      <div id="devices"></div>
+      <div class="row"><button type="button" id="pair">Add a device</button></div>
+      <div id="paircode"></div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>Task board</h2>
+      <div id="tasks"><div class="small">No tasks yet.</div></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let token = null;
+try { token = localStorage.getItem("kmesh_token"); } catch (e) {}
+let lastAnswerSeq = 0, spokenUpTo = 0;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {...opts, headers: {"Content-Type": "application/json", ...(token ? {Authorization: "Bearer " + token} : {}), ...(opts.headers || {})}});
+  if (r.status === 401 && path !== "/api/join") { await join(); return api(path, opts); }
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || r.statusText);
+  return body;
+}
+
+async function join() {
+  let code = null;
+  if (!["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) {
+    code = prompt("Pairing code from a device that already joined (Add a device):");
+  }
+  const out = await api("/api/join", {method: "POST", body: JSON.stringify(code ? {code, name: "Browser"} : {})});
+  token = out.token;
+  try { localStorage.setItem("kmesh_token", token); } catch (e) {}
+}
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const time = iso => iso ? new Date(iso).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : "";
+
+function render(s) {
+  $("here").textContent = "You're on " + s.you.name;
+  const box = $("turns"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.innerHTML = s.turns.map(t => `<div class="turn ${t.role}"><div class="meta">${t.role === "user" ? "You" : "Jarvis"} · ${esc(t.device)} · ${time(t.at)}</div>${esc(t.text)}</div>`).join("") || '<div class="small">Say something. Turns from every device show up here.</div>';
+  if (atBottom) box.scrollTop = box.scrollHeight;
+  $("devices").innerHTML = s.devices.map(d => `<div class="device"><div><span class="dot ${d.online ? "on" : ""}"></span><b>${esc(d.name)}</b>${d.id === s.you.id ? ' <span class="small">(this one)</span>' : ""}<div class="small">${d.agent ? esc(d.agent) + " · " + d.skills.length + " skills" : "no agent"}</div></div><div class="small">${d.online ? "reachable" : (d.agent ? "away" : "")}</div></div>`).join("");
+  $("tasks").innerHTML = s.tasks.map(t => `<div class="task"><div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(t.from.name)} → ${esc(t.to.name)}</b><span class="status ${t.status}">${t.status === "input-required" ? "waiting for owner" : t.status}</span></div><div>${esc(t.words)}</div>${t.progress.map(p => `<div class="small">· ${time(p.at)} ${esc(p.text)}</div>`).join("")}${t.answer ? `<div style="margin-top:4px">${esc(t.answer)}</div>` : ""}</div>`).join("") || '<div class="small">No tasks yet.</div>';
+  const last = [...s.turns].reverse().find(t => t.role === "assistant");
+  if (last && $("speak").checked && last.seq > spokenUpTo && "speechSynthesis" in window) { spokenUpTo = last.seq; speechSynthesis.speak(new SpeechSynthesisUtterance(last.text)); }
+  if (last) spokenUpTo = Math.max(spokenUpTo, $("speak").checked ? spokenUpTo : last.seq);
+}
+
+async function refresh() {
+  try { render(await api("/api/state")); $("err").textContent = ""; }
+  catch (e) { $("err").textContent = "Hub not reachable: " + e.message; }
+}
+
+$("ask").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const text = $("text").value.trim();
+  if (!text) { $("err").textContent = "Type or say something first."; return; }
+  $("text").value = ""; $("send").disabled = true; $("thinking").textContent = "Jarvis is thinking…";
+  try { await api("/api/ask", {method: "POST", body: JSON.stringify({text, wait: 15})}); }
+  catch (e) { $("err").textContent = e.message; }
+  finally { $("send").disabled = false; $("thinking").textContent = ""; refresh(); }
+});
+$("text").addEventListener("input", () => { $("err").textContent = ""; });
+
+$("pair").addEventListener("click", async () => {
+  try {
+    const p = await api("/api/pair", {method: "POST"});
+    // The QR code is SVG made by our own hub (same origin, through api()); nothing else is put in as markup.
+    const qr = typeof p.qr_svg === "string" && p.qr_svg.startsWith("<svg") ? p.qr_svg : "";
+    $("paircode").innerHTML = (qr ? `<div class="qr">${qr}</div><div class="small">On your iPhone, open the Camera and point it at this code. Tailscale must be on.</div>` : "")
+      + `<div><span class="code">${esc(p.code)}</span> <span class="small">${qr ? "or type it on the new device" : "enter it on the new device"} · 10 min</span></div>`
+      + (p.link ? `<div class="link">${esc(p.link)}</div>` : "");
+  }
+  catch (e) { $("err").textContent = e.message; }
+});
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) { $("mic").disabled = true; $("mic").title = "This browser can't listen; type instead"; }
+$("mic").addEventListener("click", () => {
+  if (!SR) return;
+  const rec = new SR(); rec.lang = navigator.language || "en-GB"; rec.interimResults = false;
+  $("thinking").textContent = "Listening…";
+  rec.onresult = e => { $("text").value = e.results[0][0].transcript; $("ask").requestSubmit(); };
+  rec.onerror = e => { $("err").textContent = "Couldn't hear that (" + e.error + ")"; };
+  rec.onend = () => { if ($("thinking").textContent === "Listening…") $("thinking").textContent = ""; };
+  rec.start();
+});
+
+(async () => { if (!token) await join().catch(e => $("err").textContent = e.message); refresh(); setInterval(refresh, 2000); })();
+</script>
+</body>
+</html>
