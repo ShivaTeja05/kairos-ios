@@ -1,0 +1,369 @@
+diff --git a/iCTRLKit/RPCTypes.swift b/iCTRLKit/RPCTypes.swift
+index 19b4222..480d312 100644
+--- a/iCTRLKit/RPCTypes.swift
++++ b/iCTRLKit/RPCTypes.swift
+@@ -104,7 +104,7 @@ enum JSONValue: Codable, Equatable {
+     var intValue: Int? {
+         switch self {
+         case .int(let v): return v
+-        case .double(let v): return Int(v)      // JSON numbers often parse as double
++        case .double(let v): return v.clampedInt   // JSON numbers often parse as double; past Int's range they land here
+         default: return nil
+         }
+     }
+@@ -127,6 +127,12 @@ enum JSONValue: Codable, Equatable {
+     }
+ }
+ 
++extension BinaryFloatingPoint {
++    /// Int(self), truncating as Int() does, without its trap: Int() kills the whole runner on NaN, ±inf
++    /// or anything past Int's range (Int(Double(Int.max)) included). nil when not finite; clamped to ±1e15.
++    var clampedInt: Int? { isFinite ? Int(Swift.min(Swift.max(self, -1e15), 1e15)) : nil }
++}
++
+ // MARK: - Auth Types
+ 
+ struct AuthRequest: Codable {
+diff --git a/iCTRLUITests/ActionHandler.swift b/iCTRLUITests/ActionHandler.swift
+index dbfdaec..8411604 100644
+--- a/iCTRLUITests/ActionHandler.swift
++++ b/iCTRLUITests/ActionHandler.swift
+@@ -804,12 +804,9 @@ class ActionHandler {
+             let text = line.dropFirst(indent)
+             if let ai = alertIndent, indent <= ai { alertIndent = nil }
+             if text.hasPrefix("Alert,") { alertIndent = indent; continue }
+-            guard alertIndent != nil, text.hasPrefix("Button,"),
+-                  let r = line.range(of: "{{"),
+-                  let end = line.range(of: "}}", range: r.lowerBound..<line.endIndex) else { continue }
+-            let v = line[r.lowerBound..<end.upperBound]
+-                .split(whereSeparator: { !"-0123456789.".contains($0) }).compactMap { Double($0) }
+-            guard v.count >= 4, v[2] > 0, v[3] > 0 else { continue }
++            // frameOf: the frame is the LAST "{{" (a label may hold "{{"), and only finite, sane values.
++            guard alertIndent != nil, text.hasPrefix("Button,"), let v = Self.frameOf(line),
++                  v[2] > 0, v[3] > 0 else { continue }
+             var label = ""
+             if let lr = line.range(of: ", label: '") {
+                 let rest = line[lr.upperBound...]
+@@ -1583,6 +1580,10 @@ class ActionHandler {
+     /// can refuse a plain back button with nothing on top; WebDriverAgent
+     /// ignores it for the same reason), so callers tap the center instead of refusing.
+     private func notHittableAdvice(label: String, frame f: CGRect) -> String? {
++        // Before `at` below: a vanished element's frame is CGRect.null, and Int(inf) traps.
++        guard usableFrame(f) else {
++            return "it has no position on screen (it may have just gone). Read the screen again, then retry."
++        }
+         let s = pointSize
+         let onScreen = f.width > 0 && f.height > 0 && f.midX >= 0 && f.midX <= s.width
+             && f.midY >= 0 && f.midY <= s.height
+@@ -1652,6 +1653,18 @@ class ActionHandler {
+         return (el, nil)
+     }
+ 
++    /// A frame a tap can aim at: finite numbers and some size. XCUITest hands back CGRect.null (origin at +inf) for an
++    /// element that left the tree between the query and the read; Int(inf) traps and takes the whole runner down.
++    private func usableFrame(_ f: CGRect) -> Bool {
++        !f.isNull && !f.isInfinite && [f.origin.x, f.origin.y, f.width, f.height].allSatisfy { $0.isFinite }
++    }
++
++    private func noFrameError(_ method: String, _ elementId: String) -> JSONRPCError {
++        JSONRPCError(code: -32602,
++                     message: "\(method): '\(elementId)' has no position on screen (it may have just gone). Read the screen again, then retry.",
++                     data: nil)
++    }
++
+     /// A small random offset (±maxJitter pt, default 3) to add to an element-tap
+     /// point so successive taps don't all land on the exact same pixel — a little
+     /// more human. Clamped so the point stays comfortably inside the element frame
+@@ -1719,6 +1732,7 @@ class ActionHandler {
+             // A coordinate synthesized tap is fast (<1s) and doesn't wait.
+             // Land a few pt off-center (within the element) so taps look less robotic.
+             let f = el!.frame
++            guard usableFrame(f) else { return (nil, noFrameError("tap", refId)) }
+             let label = el!.label
+             let (cx, cy) = humanizedPoint(in: f)
+             if refStore[refId]?.bundleId != "com.apple.springboard", let err = alertRaisedBeforeTouch() { return (nil, err) }
+@@ -1801,6 +1815,7 @@ class ActionHandler {
+             // quiescence on both sides — measured 6230ms here, and it timed out
+             // hard enough to trip the UI circuit breaker.
+             let f = el!.frame
++            guard usableFrame(f) else { return (nil, noFrameError("double_tap", refId)) }
+             let label = el!.label
+             let (cx, cy) = humanizedPoint(in: f)
+             let r = fastHandler.fastDoubleTap(x: cx, y: cy)
+@@ -1838,6 +1853,10 @@ class ActionHandler {
+ 
+     private func longPress(_ cmd: ActionCommand) -> ([String: JSONValue]?, JSONRPCError?) {
+         let duration = cmd.duration ?? 2.0
++        // A huge hold builds one event per 0.1s (fast) or blocks the UI queue for that long (native).
++        guard (0...60).contains(duration) else {
++            return (nil, JSONRPCError(code: -32602, message: "long_press: duration must be between 0 and 60 seconds", data: nil))
++        }
+         // ref-first, like tap.
+         if let refId = cmd.ref {
+             let (el, err) = resolveRefForAction(refId)
+@@ -1886,6 +1905,11 @@ class ActionHandler {
+     private func pageScroll(_ cmd: ActionCommand, method: String) -> ([String: JSONValue]?, JSONRPCError?) {
+         let size = pointSize
+         let cx = size.width / 2
++        // Past ~5.6e14 fastSwipe's `t += 0.04` rounds away and its hold loop never ends.
++        let dragDuration = cmd.duration ?? 0.35
++        guard (0...5).contains(dragDuration) else {
++            return (nil, JSONRPCError(code: -32602, message: "\(method): duration must be between 0 and 5 seconds", data: nil))
++        }
+ 
+         // Direction: explicit method wins, else the `direction` param, else down.
+         var goingDown = true
+@@ -1972,7 +1996,7 @@ class ActionHandler {
+             let t = min(remaining, perDrag)
+             let endY = goingDown ? fromY - t : fromY + t
+             let r = fastHandler.fastSwipe(fromX: cx, fromY: fromY, toX: cx, toY: endY,
+-                                          duration: cmd.duration ?? 0.35, hold: 0.25)
++                                          duration: dragDuration, hold: 0.25)
+             if r.1 != nil { return r }
+             remaining -= t
+             drags += 1
+@@ -2041,7 +2065,7 @@ class ActionHandler {
+                 if clampedEndX != endX || clampedEndY != endY {
+                     let travel = hypot(clampedEndX - x, clampedEndY - y)
+                     data["clamped"] = .string("The end point was off-screen, so the finger travelled \(Int(travel))pt, " +
+-                        "not \(Int(distance))pt. For long moves use page (several screens per call) or repeat the swipe.")
++                        "not \(distance.clampedInt ?? 0)pt. For long moves use page (several screens per call) or repeat the swipe.")
+                 }
+                 data["velocity"] = .string(velocity)
+                 data["note"] = .string("Started at (\(Int(x)),\(Int(y))) — default is screen center. velocity=\(velocity): 'fast' adds momentum (scrolls farther), 'slow' is a precise drag.")
+@@ -2688,7 +2712,7 @@ class ActionHandler {
+         // An explicit country is a request to ask THAT store — answering from
+         // the offline catalog instead would make the parameter do nothing.
+         let storeOnly = cmd.country != nil
+-        let limit = min(max(Int(cmd.distance ?? 5), 1), 25)
++        let limit = min(max((cmd.distance ?? 5).clampedInt ?? 5, 1), 25)
+ 
+         // Several candidate names in one call ("Trip.com|Ctrip|Trip"). An app's
+         // name is often not what the user said — a brand vs its store title,
+@@ -3467,7 +3491,9 @@ class ActionHandler {
+                 viewport: CGRect(x: 0, y: 0, width: pointSize.width, height: pointSize.height),
+                 maxDepth: Self.defaultMaxDepth) as? [String: Any] else { return nil }
+         let raw = r["candidates"] as? [[String: Any]] ?? []
+-        var hits = raw.compactMap(LocateHit.init)
++        // A snapshot node with no valid AX frame reports {{inf,inf},{0,0}}: no position to aim at,
++        // to report, or to put in JSON (Int(inf) traps; JSONEncoder throws on inf).
++        var hits = raw.compactMap(LocateHit.init).filter { usableFrame($0.frame) }
+         if matchMode == "contains" { hits = Self.rankContains(hits, query: query) }
+         return LocateScan(
+             candidates: hits,
+@@ -4522,9 +4548,12 @@ class ActionHandler {
+     }
+ 
+     static func frameOf(_ line: Substring) -> [Double]? {
+-        guard let r = line.range(of: "{{"), let e = line.range(of: "}}", range: r.lowerBound..<line.endIndex) else { return nil }
++        // The frame is written last and labels are written raw: the LAST "{{" is the frame, an earlier one is
++        // label text. A label like "{{ 99999999999999999999" would otherwise read as x = 1e20, and Int(x) traps.
++        guard let r = line.range(of: "{{", options: .backwards),
++              let e = line.range(of: "}}", range: r.lowerBound..<line.endIndex) else { return nil }
+         let v = line[r.lowerBound..<e.upperBound].split(whereSeparator: { !"-0123456789.".contains($0) }).compactMap { Double($0) }
+-        return v.count >= 4 ? v : nil
++        return v.count >= 4 && v.allSatisfy({ $0.isFinite && abs($0) < 1e15 }) ? v : nil
+     }
+ 
+     /// Whether the content moved between two fingerprints: most labels seen
+@@ -5306,11 +5335,9 @@ class ActionHandler {
+         for line in body.split(separator: "\n") {
+             let trimmed = line.drop { $0 == " " }
+             guard trimmed.hasPrefix("Cell,") else { continue }
+-            guard let r = line.range(of: "{{"),
+-                  let end = line.range(of: "}}", range: r.lowerBound..<line.endIndex) else { continue }
+-            let f = line[r.lowerBound..<end.upperBound]
+-                .split(whereSeparator: { !"-0123456789".contains($0) }).compactMap { Double($0) }
+-            guard f.count >= 4, f[3] > 0 else { continue }
++            // frameOf, not the first "{{": a Cell label like "{{0, -99999999999999999999" would make
++            // Int(scrolledPast / rowH) below trap. It also reads "321.5" as one number, not 321 and 5.
++            guard let f = Self.frameOf(line), f[3] > 0 else { continue }
+             tops.append(f[1])
+             bottoms.append(f[1] + f[3])
+             rowHeights.append(f[3])
+@@ -5382,7 +5409,7 @@ class ActionHandler {
+     /// 120pt above the keyboard nothing moves, from 165pt it scrolls.
+     private func pageBand(pages: Double) -> (bottom: Double, travel: Double) {
+         let h = pointSize.height
+-        let bottom = pageKeyboardTop.map { max(h * 0.3, min($0 - 120, $0 * 0.72)) } ?? h * 0.78
++        let bottom: Double = pageKeyboardTop.map { max(h * 0.3, min($0 - 120, $0 * 0.72)) } ?? h * 0.78
+         return (bottom, (pageKeyboardTop == nil ? h * 0.66 : bottom - h * 0.12) * pages)
+     }
+ 
+@@ -6076,7 +6103,9 @@ class ActionHandler {
+         // allowed to repeat (their frames overlap by nature) but leaf identity is
+         // keyed on type+frame+label.
+         let f = s.frame
+-        let key = "\(s.elementType.rawValue)|\(Int(f.minX)),\(Int(f.minY)),\(Int(f.width)),\(Int(f.height))|\(s.label)"
++        // A node with no valid AX frame reports {{inf,inf},{0,0}}; Int(inf) traps. Keep it: its children may be fine.
++        let key = "\(s.elementType.rawValue)|\(f.minX.clampedInt ?? -1),\(f.minY.clampedInt ?? -1),"
++            + "\(f.width.clampedInt ?? -1),\(f.height.clampedInt ?? -1)|\(s.label)"
+         let isDup = seenFrames.contains(key)
+ 
+         // Mirror the bounded path's viewport culling so visible_only behaves the
+@@ -6140,7 +6169,7 @@ class ActionHandler {
+         if let v = s.value as? String, !v.isEmpty { parts.append("value: '\(v)'") }
+         if !s.identifier.isEmpty { parts.append("id: '\(s.identifier)'") }
+         let f = s.frame
+-        parts.append("{{\(Int(f.minX)), \(Int(f.minY))}, {\(Int(f.width)), \(Int(f.height))}}")
++        parts.append("{{\(f.minX.clampedInt ?? -1), \(f.minY.clampedInt ?? -1)}, {\(f.width.clampedInt ?? -1), \(f.height.clampedInt ?? -1)}}")
+         return parts.joined(separator: ", ")
+     }
+ 
+@@ -6216,7 +6245,7 @@ class ActionHandler {
+         let typeFilter = cmd.elementType
+         let explicitDirection = cmd.direction?.lowercased()
+         var direction = explicitDirection ?? "up"
+-        let maxSteps = max(1, Int(cmd.distance ?? 12))
++        let maxSteps = min(max(1, (cmd.distance ?? 12).clampedInt ?? 12), 1000)   // the time budget stops far sooner
+         let size = pointSize
+         let target = XCUIApplication(bundleIdentifier: bundleId)
+         let q = elementQuery(in: target, type: typeFilter)
+@@ -6446,7 +6475,7 @@ class ActionHandler {
+         let direction = (cmd.direction ?? "up").lowercased()
+         // Smaller step (40% of the screen) so we don't scroll PAST a short target
+         // between checks. More attempts to compensate for the shorter travel.
+-        let maxSwipes = Int(cmd.distance ?? 12)
++        let maxSwipes = min((cmd.distance ?? 12).clampedInt ?? 12, 1000)
+         // Match mode: "exact" (default, precise) or "contains" (loose).
+         let matchMode = (cmd.matchMode ?? "exact").lowercased()
+         let typeFilter = cmd.elementType
+@@ -6476,6 +6505,7 @@ class ActionHandler {
+ 
+         func result(_ el: XCUIElement, match: ElementRef.Match, index: Int, swipes: Int) -> ([String: JSONValue]?, JSONRPCError?) {
+             let f = el.frame
++            guard usableFrame(f) else { return (nil, noFrameError("scroll_to_element", query)) }
+             let ref = makeRef(ElementRef(bundleId: bundleId, match: match, elementType: typeFilter, index: index, createdAt: nowMonotonic))
+             return ([
+                 "found": .bool(true),
+@@ -7444,6 +7474,7 @@ class ActionHandler {
+         let t0 = nowMonotonic
+         let snap = lastLocateScan?.candidates.first
+         let frame = snap?.frame ?? element.frame
++        guard usableFrame(frame) else { return (nil, noFrameError("find_element", elementId)) }
+         let elementType = snap?.elementType ?? element.elementType
+         let ref = makeRef(ElementRef(bundleId: cmd.bundleId ?? resolveForegroundBundleId(),
+                                      match: match, elementType: cmd.elementType, index: index,
+@@ -7537,6 +7568,7 @@ class ActionHandler {
+             if let err = lastLocateError { return (nil, err) }
+             if let hit = slowTreeHit, hit.inView {
+                 let f = hit.frame
++                guard usableFrame(f) else { return (nil, noFrameError("tap", elementId)) }
+                 tapTargetFrame = f
+                 let r = fastHandler.fastTap(x: f.midX, y: f.midY)
+                 if r.1 != nil { return r }
+@@ -7557,6 +7589,7 @@ class ActionHandler {
+         // sides — but reliable.
+         if cmd.fast == false {
+             let f = element.frame
++            guard usableFrame(f) else { return (nil, noFrameError("find_and_tap", elementId)) }
+             let label = element.label
+             if !element.safeIsHittable, let why = notHittableAdvice(label: label, frame: f) {
+                 return (nil, JSONRPCError(
+@@ -7590,7 +7623,11 @@ class ActionHandler {
+         var ts = nowMonotonic
+         let f = element.frame
+         tail.append("frame=\(Int((nowMonotonic - ts) * 1000))ms")
+-        if let sf = lastLocateSnapFrame {
++        guard usableFrame(f) else {
++            iCTRLUITests.logBuffer.append("🎯 find_and_tap tail [\(tail.joined(separator: " "))] ✗no-frame")
++            return (nil, noFrameError("find_and_tap", elementId))
++        }
++        if let sf = lastLocateSnapFrame, usableFrame(sf) {
+             let stable = abs(sf.midX - f.midX) <= 2 && abs(sf.midY - f.midY) <= 2
+             tail.append(stable ? "stable" : "drift(\(Int(sf.midX)),\(Int(sf.midY))→\(Int(f.midX)),\(Int(f.midY)))")
+         } else {
+@@ -7649,6 +7686,7 @@ class ActionHandler {
+             if let err = lastLocateError { return (nil, err) }
+             if let hit = slowTreeHit, hit.inView {
+                 let f = hit.frame
++                guard usableFrame(f) else { return (nil, noFrameError("tap", elementId)) }
+                 tapTargetFrame = f
+                 let r = fastHandler.fastTap(x: f.midX, y: f.midY)
+                 if r.1 != nil { return r }
+@@ -7662,12 +7700,14 @@ class ActionHandler {
+                 data: nil
+             ))
+         }
+-        if !element.safeIsHittable, let why = notHittableAdvice(label: element.label, frame: element.frame) {
+-            let f = element.frame
++        // One read for the check, the advice and its data: each live read re-resolves, and can come back null.
++        let f0 = element.frame
++        guard usableFrame(f0) else { return (nil, noFrameError("tap_element", elementId)) }
++        if !element.safeIsHittable, let why = notHittableAdvice(label: element.label, frame: f0) {
+             return (nil, JSONRPCError(
+                 code: -32602,
+                 message: "Element '\(elementId)' can't be tapped: " + why,
+-                data: ["x": .double(f.midX), "y": .double(f.midY)]
++                data: ["x": .double(f0.midX), "y": .double(f0.midY)]
+             ))
+         }
+ 
+@@ -7675,6 +7715,7 @@ class ActionHandler {
+         // post-event settling, slightly humanized) rather than XCUIElement.tap(),
+         // which can run ~4s when the tap navigates and has coincided with teardown.
+         let f = element.frame
++        guard usableFrame(f) else { return (nil, noFrameError("tap_element", elementId)) }
+         let label = element.label
+         let (tx, ty) = humanizedPoint(in: f)
+         if cmd.bundleId != "com.apple.springboard", let err = alertRaisedBeforeTouch() { return (nil, err) }
+@@ -7708,12 +7749,16 @@ class ActionHandler {
+         if let r = cmd.fromRef {
+             let (el, err) = resolveRefForAction(r)
+             if let err = err { return (nil, err) }
+-            fromX = Double(el!.frame.midX); fromY = Double(el!.frame.midY)
++            let f = el!.frame
++            guard usableFrame(f) else { return (nil, noFrameError("drag", r)) }
++            fromX = Double(f.midX); fromY = Double(f.midY)
+         }
+         if let r = cmd.toRef {
+             let (el, err) = resolveRefForAction(r)
+             if let err = err { return (nil, err) }
+-            toX = Double(el!.frame.midX); toY = Double(el!.frame.midY)
++            let f = el!.frame
++            guard usableFrame(f) else { return (nil, noFrameError("drag", r)) }
++            toX = Double(f.midX); toY = Double(f.midY)
+         }
+         guard let fromX = fromX, let fromY = fromY, let toX = toX, let toY = toY else {
+             return (nil, JSONRPCError(
+@@ -7752,6 +7797,10 @@ class ActionHandler {
+ 
+     private func wait(_ cmd: ActionCommand) -> ([String: JSONValue]?, JSONRPCError?) {
+         let duration = cmd.duration ?? 1.0
++        // useconds_t is UInt32: a negative or >4294s value traps in the conversion.
++        guard (0...4000).contains(duration) else {
++            return (nil, JSONRPCError(code: -32602, message: "wait: 'duration' must be a number of seconds between 0 and 4000.", data: nil))
++        }
+         usleep(useconds_t(duration * 1_000_000))
+         return (["message": .string("Waited \(duration)s")], nil)
+     }
+diff --git a/iCTRLUITests/ScreenSettle.swift b/iCTRLUITests/ScreenSettle.swift
+index 7aac9a1..2e31510 100644
+--- a/iCTRLUITests/ScreenSettle.swift
++++ b/iCTRLUITests/ScreenSettle.swift
+@@ -213,8 +213,10 @@ enum ScreenSettle {
+     /// without a point. The radius fits a typical ~20pt glyph (play/pause):
+     /// a wider area dilutes its change, and the whole screen barely moves.
+     static func localDiff(_ a: Frame, _ b: Frame, at p: CGPoint?, screen: CGSize, ignoring ignore: [Bool]? = nil) -> Double {
+-        guard let p = p, screen.width > 0, screen.height > 0 else { return 0 }
+-        let cx = Int(p.x / screen.width * Double(gridW)), cy = Int(p.y / screen.height * Double(gridH))
++        // A point from a vanished element's frame is +inf, and Int(inf) traps.
++        guard let p = p, screen.width > 0, screen.height > 0,
++              let cx = (p.x / screen.width * Double(gridW)).clampedInt,
++              let cy = (p.y / screen.height * Double(gridH)).clampedInt else { return 0 }
+         let rx = max(1, Int(24 / screen.width * Double(gridW))), ry = max(1, Int(24 / screen.height * Double(gridH)))
+         // A point in the status bar (or off the grid) leaves an empty range,
+         // and a closed range with lower > upper is a fatal error that would
+diff --git a/iCTRLUITests/iCTRLUITests.swift b/iCTRLUITests/iCTRLUITests.swift
+index 4ef0ee9..3140a11 100644
+--- a/iCTRLUITests/iCTRLUITests.swift
++++ b/iCTRLUITests/iCTRLUITests.swift
+@@ -1046,7 +1046,7 @@ final class iCTRLUITests: XCTestCase, UNUserNotificationCenterDelegate {
+                 switch v {
+                 case .string(let s): parts.append("\(k)='\(s)'")
+                 case .int(let i): parts.append("\(k)=\(i)")
+-                case .double(let d): parts.append("\(k)=\(Int(d))")
++                case .double(let d): parts.append(abs(d) < 1e15 ? "\(k)=\(Int(d))" : "\(k)=\(d)")   // Int(1e19) traps
+                 case .bool(let b): parts.append("\(k)=\(b)")
+                 default: break
+                 }
