@@ -16,7 +16,7 @@ daughter") should call the daughter, not offer to buy her a phone, which is what
 baseline.
 
 ## How to read it
-1. **Extract tool schemas** straight from the app's Swift source (`kairos-models/tools/extract_tools.py`), so training uses exactly the tools the app sends.
+1. **Extract tool schemas** straight from the app's Swift source (`tools/extract_tools.py` in kairos-models, a separate project that isn't in this repo), so training uses exactly the tools the app sends.
 2. **A teacher writes examples:** `qwen3.5:35b`, running locally, so no key even for training. English, Hindi, Telugu, plus attacks and clean twins.
 3. **Code checks every example.** The schema, the app's rules and SafetyGate's provenance rule must all agree. Rejects are logged with the reason. This is the qPilot idea: the AI proposes, the code checks.
 4. **Fine-tune:** supervised training first, then RL where **the safety gate's checks are the reward**. A model can't win by refusing everything: refusing a clear, safe request costs reward.
@@ -24,8 +24,8 @@ baseline.
 6. **Ship:** an Ollama model for the hub, plus a Hugging Face model card.
 
 ## Real today vs. not
-- **Real:** step 1 (all 57 tools extracted), the eval harness, the pre-registration (`eval/PREREG.md`), and the baseline on 4 open models. No base model had all three abilities.
-- **To build:** steps 2–6. The test set Shiva writes himself (`test_v1`) has to come before any training.
+- **Real, in kairos-models:** step 1 (all 57 tools the app had on 30 Oct extracted; it has 60 now), the eval harness, the pre-registration (`eval/PREREG.md`), and the baseline on 4 open models. No base model had all three abilities.
+- **To build:** steps 2–6. The hand-written test set (`test_v1`) has to come before any training.
 
 ## Related
-`kairos-models/README.md` (the baseline results table) · `kairos-models/eval/PREREG.md`
+In kairos-models (a separate project, not in this repo): `README.md` (the baseline results table) · `eval/PREREG.md`

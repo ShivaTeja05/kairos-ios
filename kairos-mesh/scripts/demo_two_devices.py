@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Demo: iPhone <-> Mac through the shared brain, with one conversation.
 
-    .venv/bin/python scripts/demo_two_devices.py            # hub on http://127.0.0.1:8778, Mac node running
+    .venv/bin/python scripts/demo_two_devices.py   # run from kairos-mesh/; hub on 127.0.0.1:8778, Mac node running
 
-The Mac side is real: the hub, the Mac node and the local model. The iPhone side is a STAND-IN played by this
-script until the Swift iPhone node exists: it pairs like a real phone, sends its turns and tasks through the same
-API, and answers the one task sent to it with a fixed, labelled answer.
+The Mac side is real: the hub, the Mac node and the local model. The iPhone side is a labelled STAND-IN played by
+this script, so you can try the hub without a phone. (The real iPhone node is in the iPhone app:
+kairos-ios/TempoApp/Agents/Mesh/MeshNode.swift.) The stand-in pairs like a real phone, sends its turns and tasks
+through the same API, and answers the one task sent to it with a fixed, labelled answer.
 """
 import os
 import sys

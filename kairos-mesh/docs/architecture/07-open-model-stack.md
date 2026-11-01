@@ -35,4 +35,4 @@ and what gets handed to the Mac.
 
 ## Real today vs. not
 - **Real:** rules first; Ollama with qwen2.5:7b, qwen3.5:4b and qwen3.5:35b on the Mac; your Piper voices (in another repo).
-- **To build:** everything dashed. Plan details: [kairos-models/README.md](../../../kairos-models/README.md) and [PLAN.md](../PLAN.md).
+- **To build:** everything dashed. Plan details: kairos-models (a separate project, not in this repo) and [PLAN.md](../PLAN.md).

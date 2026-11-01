@@ -139,7 +139,7 @@ def qr_svg(text: str) -> str:
 
 
 def computer_name() -> str:
-    """The friendly name ("Shiva's MacBook Pro"), not the network hostname ("Sams-MacBook-Pro")."""
+    """The friendly name ("Sam's MacBook Pro"), not the network hostname ("Sams-MacBook-Pro")."""
     if platform.system() == "Darwin":
         try:
             name = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True,

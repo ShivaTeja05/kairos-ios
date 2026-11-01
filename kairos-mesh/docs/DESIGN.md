@@ -6,8 +6,8 @@ what's needed does it there, under that device's own safety rules, and the answe
 > Ask on your Android phone's browser: "what's on tomorrow, and text Priya I'll be late". The iPhone reads its own
 > calendar and prepares the text. Face ID appears **on the iPhone** before anything is sent.
 
-This repo builds that layer on its own, so the existing hub (`tempo-hub`) stays untouched until we merge
-(`docs/tempo-hub-routes.patch` holds the routes for that merge).
+The hub (`kairos-mesh/`) builds that layer on its own, so the OxHack hub (`tempo-hub`) stays untouched until we merge
+(`docs/tempo-hub-merge/routes.patch` holds the routes for that merge, next to `nodes.py` and its tests).
 
 ## 0. The vision: one Jarvis for all your devices
 
@@ -30,7 +30,7 @@ agent does the step under its own rules, and anything risky needs Face ID on tha
 
 **Operating other iPhone apps (WhatsApp, Uber, …) works on our own phone,** through the iCTRL UI-automation runner
 (kairos-ios Phone operator). OpenClaw's iPhone app doesn't do this; its docs describe app control only on Android.
-The conditions come from `phone-control/keep_ictrl_alive.sh` and `start_ictrl.sh`:
+The conditions come from our iCTRL scripts, which live outside this repo (`keep_ictrl_alive.sh` and `start_ictrl.sh`):
 
 | Condition | Effect |
 |---|---|
