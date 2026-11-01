@@ -275,7 +275,7 @@ enum MoneyParser {
 
 struct MoneyPayee: Codable, Sendable, Equatable {
     var id: String
-    /// How the person knows them: "Arjun Gaddam".
+    /// How the person knows them: "Arjun Rao".
     var displayName: String
     /// "my son", "arjun".
     var aliases: [String] = []
@@ -306,7 +306,7 @@ struct MoneyPayee: Codable, Sendable, Equatable {
         return displayName
     }
 
-    /// navigator's describe(): "Arjun Gaddam, account ending 4821" / "Octopus Energy, reference A-7731-22".
+    /// navigator's describe(): "Arjun Rao, account ending 4821" / "Octopus Energy, reference A-7731-22".
     var described: String {
         if kind == "biller", !reference.isEmpty { return "\(spokenName), reference \(reference)" }
         if !accountLast4.isEmpty { return "\(spokenName), account ending \(accountLast4)" }
@@ -384,10 +384,10 @@ struct MoneyPayeeBook: Codable, Sendable, Equatable {
         let longAgo = now.addingTimeInterval(-200 * 86_400)
         let recent = now.addingTimeInterval(-3_600)
         let payees = [
-            MoneyPayee(id: "son", displayName: "Arjun Gaddam", aliases: ["my son", "arjun", "son"], bankName: "ARJUN GADDAM",
+            MoneyPayee(id: "son", displayName: "Arjun Rao", aliases: ["my son", "arjun", "son"], bankName: "ARJUN RAO",
                        accountLast4: "4821", usualPence: 20_000, maxPence: 50_000, addedAt: longAgo),
-            MoneyPayee(id: "daughter", displayName: "Priya Gaddam", aliases: ["my daughter", "priya", "daughter"],
-                       bankName: "PRIYA GADDAM", accountLast4: "0193", usualPence: 10_000, maxPence: 50_000, addedAt: longAgo),
+            MoneyPayee(id: "daughter", displayName: "Priya Rao", aliases: ["my daughter", "priya", "daughter"],
+                       bankName: "PRIYA RAO", accountLast4: "0193", usualPence: 10_000, maxPence: 50_000, addedAt: longAgo),
             MoneyPayee(id: "landlord", displayName: "Oxford Lettings Ltd", aliases: ["my landlord", "landlord", "the rent", "rent"],
                        bankName: "OXFORD LETTINGS LTD", accountLast4: "7710", reference: "FLAT 4B", usualPence: 95_000,
                        maxPence: 100_000, addedAt: longAgo),
@@ -471,7 +471,7 @@ struct MoneyPayeeBook: Codable, Sendable, Equatable {
 
     // MARK: Text helpers (navigator's normalise() and similarity())
 
-    /// Lower case, no accents, no titles or punctuation: "Mr. Arjun  GADDAM" → "arjun gaddam".
+    /// Lower case, no accents, no titles or punctuation: "Mr. Arjun  RAO" → "arjun rao".
     static func normalise(_ s: String) -> String {
         var t = s.folding(options: [.diacriticInsensitive, .caseInsensitive, .widthInsensitive], locale: nil).lowercased()
         t = t.replacingOccurrences(of: #"\b(?:mr|mrs|ms|miss|dr|prof|sir|dame|shri|smt)\b\.?"#, with: " ", options: .regularExpression)
@@ -1087,7 +1087,7 @@ extension MoneyAgent {
         let book = MoneyPayeeBook.demo(now: start)
         check(book.resolve("my son") == .match(book.payees[0]), "resolve 'my son'")
         check(book.resolve("the electricity bill") == .match(book.payees[4]), "resolve 'the electricity bill'")
-        check(book.resolve("arjun gadam") == .match(book.payees[0]), "fuzzy 'arjun gadam'")
+        check(book.resolve("arjun rau") == .match(book.payees[0]), "fuzzy 'arjun rau'")
         check(book.resolve("my grandson") == .unknown, "an unknown payee is never guessed")
         check(MoneyPrepareTool.match("Pay the electricity bill £86.40", book: book)?.text("payee") == "Octopus Energy", "rules: pay a bill")
         check(MoneyPrepareTool.match("Send a message to my son", book: book) == nil, "rules: a message is not a payment")
