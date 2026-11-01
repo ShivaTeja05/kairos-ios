@@ -12,7 +12,7 @@
 4. Prints the results by category and every failure with its reason.
 
 The phone must be unlocked, with Kairos allowed to run (the self-test keeps the screen awake). Live WhatsApp cases
-also need the iCTRL runner (phone-control/start_ictrl.sh). Nothing here reads or prints a secret.
+also need the iCTRL runner on the phone (Tools/iCTRL/README.md). Nothing here reads or prints a secret.
 """
 from __future__ import annotations
 

@@ -5,7 +5,10 @@ We test Kairos in three places:
 1. **On the real iPhone**, with an on-phone self-test that sends everyday requests through the real agent and the
    real Gemini model, as a dry run.
 2. **On the Mac**, by compiling the app's own Swift and calling real Gemini with it (GeminiSmoke).
-3. **In the kairos-mesh hub** (a separate repo), with 61 pytest tests.
+3. **For the Mac hub** (`kairos-mesh/`), with 61 pytest tests.
+
+File paths on this page start at the root of this repo: the iPhone app and its test tools are in `kairos-ios/`, the
+Mac hub is in `kairos-mesh/`.
 
 The headline: on 31 Oct 2026, on a real iPhone 12 Pro Max, the self-test sent **152 of 165** requests to the right
 action, up from **116 of 165** that morning. Read the caveats in [Results so far](#results-so-far) before quoting it.
@@ -13,6 +16,11 @@ action, up from **116 of 165** that morning. Read the caveats in [Results so far
 Status words, as in the [README](../README.md): *run on device*, *built*, *compiled only*, *planned*.
 
 ## How the self-test works
+
+The on-phone self-test dates from the OxHack build: a dry run with 32 built-in cases, started with `xcrun devicectl`.
+Since OxHack we added the 165-case set (`kairos-ios/Tools/SelfTest/cases.json`), the Mac runner (`run_selftest.py`)
+and the self-test upgrades: loading cases copied from the Mac, live reads, Siri-style cases, the extra judging rules
+and action checks, and the *compiled only* upgrades below.
 
 The self-test is a **dry run**. Each case sends one sentence to `KairosAgent` with `dryRun` switched on. The rules
 and Gemini run exactly as they would for a person, and every proposed tool call still goes through the SafetyGate,
@@ -82,8 +90,8 @@ with nothing proposed, or when a live tool failed (waiting 5 s).
 Gemini quota failures with the stop after 3 in a row, and the pause while the phone is hot. None of the saved result
 summaries has these fields yet.
 
-**Code:** `TempoApp/Agents/SelfTest/SelfTest.swift`, `TempoApp/Agents/Core/KairosAgent.swift` (`dryRun`,
-`dryRunLiveReads`, `liveReadTools`, `dryRunOutcome`), `Tools/SelfTest/run_selftest.py`.
+**Code:** `kairos-ios/TempoApp/Agents/SelfTest/SelfTest.swift`, `kairos-ios/TempoApp/Agents/Core/KairosAgent.swift`
+(`dryRun`, `dryRunLiveReads`, `liveReadTools`, `dryRunOutcome`), `kairos-ios/Tools/SelfTest/run_selftest.py`.
 
 ### The judge
 
@@ -113,7 +121,7 @@ flowchart TD
 
 ## Judging rules
 
-Each case is a small JSON object. For example, from `Tools/SelfTest/smoke.json`:
+Each case is a small JSON object. For example, from `kairos-ios/Tools/SelfTest/smoke.json`:
 
 ```json
 {
@@ -157,9 +165,9 @@ example "Create an agent", then the job). Setup turns always run the live read t
 
 ## The cases
 
-`Tools/SelfTest/cases.json` holds 165 cases, each with a note explaining the expected routing. 30 are **live** and 22
-are **Siri-style**: they use the `siriBackground` source, the same path "Hey Siri, ask Kairos" takes, but they are
-simulated inside the app, not spoken to Siri. The id prefixes form six groups:
+`kairos-ios/Tools/SelfTest/cases.json` holds 165 cases, each with a note explaining the expected routing. 30 are
+**live** and 22 are **Siri-style**: they use the `siriBackground` source, the same path "Hey Siri, ask Kairos" takes,
+but they are simulated inside the app, not spoken to Siri. The id prefixes form six groups:
 
 | Group (id prefix) | What it covers | Cases | Live | Siri-style |
 | --- | --- | --- | --- | --- |
@@ -184,9 +192,9 @@ Three live cases expect a tool that is not a live read, so in today's code their
 run, and the stricter live check can't catch a failed answer in them: the two Mac cases (`ask_my_mac`) and a FaceTime
 case (`operate_app`).
 
-`Tools/SelfTest/smoke.json` is a 4-case quick check: an alarm with its time checked, a live calendar read, a
-Siri-style reminder, and a weather-plus-alarm chain. Without a cases file on the phone, the app runs 32 built-in
-cases, mostly about worker-agent routing.
+`kairos-ios/Tools/SelfTest/smoke.json` is a 4-case quick check: an alarm with its time checked, a live calendar read,
+a Siri-style reminder, and a weather-plus-alarm chain. Without a cases file on the phone, the app runs its 32 built-in
+cases from the OxHack build, mostly about worker-agent routing.
 
 ## How to run it
 
@@ -194,7 +202,11 @@ You need the Mac with Xcode, the iPhone connected and unlocked, and Kairos insta
 Live WhatsApp cases also need the iCTRL runner on the phone.
 
 ```bash
-# Your iPhone's device id and your build's bundle id (the runner's defaults are ours).
+# Run from the iPhone app's folder.
+cd kairos-ios
+
+# Both are required (the runner has no defaults): your iPhone's device id
+# (from: xcrun devicectl list devices) and your build's bundle id.
 export KAIROS_DEVICE=<your-device-id>
 export KAIROS_BUNDLE=<your.bundle.id>
 
@@ -207,9 +219,12 @@ python3 -I Tools/SelfTest/run_selftest.py Tools/SelfTest/cases.json --report-onl
 ```
 
 `--timeout` sets how long to wait for a run (default 3600 s). Results are saved as
-`Tools/SelfTest/results/selftest-<date>-<time>.json`. That folder is **git-ignored**: result files hold real contact
-names, memories and file paths from the phone and Mac. For the same reason, don't paste the runner's failure printout
-into issues: it includes the start of each reply.
+`kairos-ios/Tools/SelfTest/results/selftest-<date>-<time>.json`. That folder is **git-ignored**: result files hold
+real contact names, memories and file paths from the phone and Mac. For the same reason, don't paste the runner's
+failure printout into issues: it includes the start of each reply.
+
+The default `--out` is relative to the folder you run from. Run the self-test from `kairos-ios/`: from anywhere else,
+the results land in a folder git doesn't ignore.
 
 On the phone alone: **More › Developer › Run self-test (dry run)**, or launch the app with `-KairosSelfTest`.
 
@@ -255,9 +270,9 @@ By group, run 1 to run 2:
 
 What testing caught and we fixed:
 
-- **Emergencies depended on the model.** In run 1, "Ring an ambulance, my husband has fallen and he isn't waking up"
-  was told to ring "112 or 102", the wrong numbers for the UK. Emergencies now get a fixed 999 answer in code before
-  any model, without hijacking scam questions.
+- **Emergencies depended on the model.** In run 1, for "Ring an ambulance, my husband has fallen and he isn't waking
+  up", the model offered "112 or 102" (102 is an Indian ambulance number) instead of 999. Emergencies now get a fixed
+  answer in code before any model, "ring 999" (112 away from the UK), without hijacking scam questions.
 - **Agents claimed work they hadn't done.** Code now stops a reply that claims an action no tool performed or quotes a
   number no tool returned, and workers can finish only with evidence.
 - **The judge was too lenient** with live reads (see stricter live judging above).
@@ -267,12 +282,25 @@ What testing caught and we fixed:
 
 | Check | What it does | Where | Status |
 | --- | --- | --- | --- |
-| GeminiSmoke | Compiles the app's own Swift (`JSONValue`, `AgentKit`, `ModelProvider`, `KeyStore`, `GroundedSearch`) for macOS with `swiftc` and makes 5 real Gemini calls: a tool call, the tool result sent back (thought signatures and ids round-trip), structured JSON with the letter-reader schema, a photo of a letter, and Google Search grounding that must return sources. Exits 0 only if all pass. Reads the key from `tempo-hub/agents/.env` next to this repo and prints only its last 3 characters | `Tools/GeminiSmoke/run.sh`, `main.swift` | Built; no saved output, so the date of the last pass is unknown |
-| Search check | For each model, one plain request and one with Google Search; prints the HTTP status, quota metric and retry delay, never the key | `Tools/GeminiSmoke/search_check.py` | Built |
-| kairos-mesh hub tests | 61 pytest tests: 24 for the hub (pairing codes and the guessing cap, tasks in both directions, leases and requeueing, the shared conversation, rules-first routing, the Host allow-list, Funnel refused, the pairing link), 32 for the `kairos` command (against sample Tailscale JSON with placeholder names such as `mac.tail1234.ts.net`) and 5 for the Mac's tools (planted traps: a note saying "IGNORE ALL RULES", a `.env` file and a bank statement). A fake model, fake Tailscale and a temporary database. On 1 Nov with `CI=1`: 60 passed and 1 skipped (the check that made-up app names are refused, which needs a real Mac) | kairos-mesh `tests/` | Passing on the Mac (unit tests with fakes, not a device run) |
+| GeminiSmoke | Compiles the app's own Swift (`JSONValue`, `AgentKit`, `ModelProvider`, `KeyStore`, `GroundedSearch`) for macOS with `swiftc` and makes 5 real Gemini calls: a tool call, the tool result sent back (thought signatures and ids round-trip), structured JSON with the letter-reader schema, a photo of a letter, and Google Search grounding that must return sources. Exits 0 only if all pass. Reads the key from `GEMINI_API_KEY`, or else from `tempo-hub/agents/.env` in the folder that holds this repo, and prints only its last 3 characters | `kairos-ios/Tools/GeminiSmoke/run.sh`, `main.swift` | Built; no saved output, so the date of the last pass is unknown |
+| Search check | For each model, one plain request and one with Google Search; prints the HTTP status, quota metric and retry delay, never the key. Finds the key the same way as GeminiSmoke | `kairos-ios/Tools/GeminiSmoke/search_check.py` | Built |
+| kairos-mesh hub tests | 61 pytest tests: 24 for the hub (pairing codes and the guessing cap, tasks in both directions, leases and requeueing, the shared conversation, rules-first routing, the Host allow-list, Funnel refused, the pairing link), 32 for the `kairos` command (against sample Tailscale JSON with placeholder names such as `mac.tail1234.ts.net`) and 5 for the Mac's tools (planted traps: a note saying "IGNORE ALL RULES", a `.env` file and a bank statement). A fake model, fake Tailscale and a temporary database. On 1 Nov with `CI=1`: 60 passed and 1 skipped (the check that made-up app names are refused, which needs a real Mac) | `kairos-mesh/tests/` | Passing on the Mac (unit tests with fakes, not a device run) |
 | WhatsApp screen harness | The app's operator code compiled on the Mac and run against WhatsApp screens captured from the phone: 86 of 86 checks pass, and 13 fail when the fix is undone | A working folder, not yet in this repo | Compiled only |
-| Real devices across the mesh | The Mac asked the real iPhone's calendar: 0.8 s over USB, 0.4 s over Tailscale (31 Oct). In the Simulator, a forced call card showed "waiting for owner" and finished only after Yes and Face ID, and a task whose app was killed was requeued after 30 s and answered | kairos-mesh README | Run on device (Mac to iPhone); Simulator for the card |
+| Real devices across the mesh | The Mac asked the real iPhone's calendar: 0.8 s over USB, 0.4 s over Tailscale (31 Oct). In the Simulator, a forced call card showed "waiting for owner" and finished only after Yes and Face ID, and a task whose app was killed was requeued after 30 s and answered | `kairos-mesh/README.md` | Run on device (Mac to iPhone); Simulator for the card |
 | Adversarial reviews | After each round of changes, independent AI reviewers try to refute them (correctness, security, regressions) | — | Done for this week's changes |
+
+To run the Gemini checks and the hub's tests:
+
+```bash
+# From the root of this repo. Uses GEMINI_API_KEY if it is set, else tempo-hub/agents/.env
+# in the folder that holds this repo.
+kairos-ios/Tools/GeminiSmoke/run.sh                  # default model: gemini-3.5-flash-lite
+python3 -I kairos-ios/Tools/GeminiSmoke/search_check.py
+
+# The hub's tests, from the hub's folder (set up .venv as in kairos-mesh/README.md).
+cd kairos-mesh
+CI=1 .venv/bin/python -m pytest -q                   # CI=1 skips the one test that needs a real Mac
+```
 
 Some files carry their own check functions (`selfTest()` in `MoneyAgent.swift`, `SpokenTime.swift`,
 `ScamShield.swift`, `RoutineStore.swift`, `OwnerPolicy.swift`, and `StudioSelfTest` in `StudioAgent.swift`). Nothing

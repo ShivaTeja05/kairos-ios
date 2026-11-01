@@ -3,7 +3,7 @@
 What we're building next, why, and what Kairos can't do yet. Phase 1 is mostly *run on device*, and the next section
 is code that is *compiled only*. From Phase 2 on, the work is **planned**: not built, apart from the pieces a section
 says already exist. Status words, as in the [README](../README.md): *run on device*, *built*, *compiled only*,
-*planned*.
+*planned*. The hub's longer design notes and plan are in `kairos-mesh/docs/DESIGN.md` and `kairos-mesh/docs/PLAN.md`.
 
 ## Where we are
 
@@ -68,7 +68,7 @@ question should go to the device that holds the data.
 **Status:** *compiled only*. Written in the week to 1 Nov 2026; builds, but not yet run on the phone.
 
 - WhatsApp's new design (86/86 checks on captured screens), and a first successful app read on the phone.
-- Our iCTRL crash fixes (`Tools/iCTRL/`) and the hand-back when iOS ends background time early.
+- Our iCTRL crash fixes (`kairos-ios/Tools/iCTRL/`) and the hand-back when iOS ends background time early.
 - The "call her" follow-up, and FaceTime and gallery-photo routing.
 - Self-test upgrades: the 240 s per-case limit, "not judged" for quota failures, the heat pause, stricter live judging.
 - Then a full 165-case run on today's build.
@@ -118,7 +118,7 @@ which falls back to English when a language isn't supported, and our test set ha
 ## Phase 5: a trained router decides where work goes
 
 **Status:** *planned*. The tool catalogue, a draft test set and an evaluation harness exist in a separate project
-(kairos-models, not yet public); the training, pipeline and shipping folders are empty.
+(kairos-models, not in this repo); the training, pipeline and shipping folders are empty.
 
 - **kairos-router-4b on the Mac**, fine-tuned from `qwen3.5:4b`. Supervised fine-tuning first, then reinforcement
   learning (GRPO) with the SafetyGate's checks as the reward: +1 for the right tool and arguments, −3 for an argument
@@ -195,7 +195,7 @@ that an approval really came from the owner.
   Directory extensions).
 - **Open Banking** for regulated payments, instead of tapping through bank apps.
 - **An accessible redesign** of the hub's web page, which has 10 known usability and accessibility problems.
-- **Carer-led pilots** through TestFlight, and a public Apache-2.0 repo.
+- **Carer-led pilots** through TestFlight.
 - **A study with 5 to 8 intended users**, including Hindi and Telugu speakers.
 - **A placement benchmark:** latency and energy for answering on a small device against routing to a bigger one.
 
@@ -244,5 +244,4 @@ that an approval really came from the owner.
   Europe/London times and Oxford as the default weather town.
 - **Spoken times are English only.** A Hindi request such as "Kal subah 6 baje ka alarm laga do" relies on the model,
   and the hub's rules know only English device words.
-- **No users have tried Kairos yet**, and as of 1 Nov 2026 nothing is public: this repo is private and the kairos-mesh hub (a separate
-  repo) is not on GitHub.
+- **No users have tried Kairos yet.** No user study has been done.

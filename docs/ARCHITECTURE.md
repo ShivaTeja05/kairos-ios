@@ -1,9 +1,14 @@
 # Architecture
 
-This page explains how Kairos for iPhone is put together, in seven diagrams. Each one says what it shows, how to read
-it, and where the code is. Paths that start with `Agents/`, and bare file names such as `TempoSession.swift`,
-`ContentView.swift` and `KeyStore.swift`, are under `TempoApp/`. `Tools/` is at the repo root. Paths marked
-"kairos-mesh" are in the Mac hub's own repo (a separate repo).
+This page explains how Kairos is put together, the iPhone app and the Mac hub, in seven diagrams. Each one says what
+it shows, how to read it, and where the code is.
+
+Where the code is: this repo has two parts. The iPhone app is in `kairos-ios/`, and its code is in
+`kairos-ios/TempoApp/` (the Xcode project still uses the OxHack name, Tempo). Paths that start with `Agents/`, and bare
+file names such as `TempoApp.swift`, `TempoSession.swift`, `ContentView.swift` and `KeyStore.swift`, are under
+`kairos-ios/TempoApp/`. The test tools are in `kairos-ios/Tools/`. The Mac hub is in `kairos-mesh/`, and its files are
+written in full, such as `kairos-mesh/mesh/app.py`. The hub also has its own notes and eight SVG diagrams in
+`kairos-mesh/docs/architecture/`.
 
 Status words, as in the [README](../README.md): *run on device* = seen working on the real iPhone or Mac;
 *built* = code exists and is wired in, not yet run end to end; *compiled only* = written in the week to 1 Nov 2026,
@@ -11,8 +16,8 @@ builds, not yet run; *planned* = only in plans.
 
 ## A few terms first
 
-- **KairosAgent** (`TempoApp/Agents/Core/KairosAgent.swift`) is the one orchestrator. Almost every request goes
-  through `KairosAgent.handle(_:source:images:)`. Siri routines, Siri asking a named helper while a helper is in focus,
+- **KairosAgent** (`kairos-ios/TempoApp/Agents/Core/KairosAgent.swift`) is the one orchestrator. Almost every request
+  goes through `KairosAgent.handle(_:source:images:)`. Siri routines, Siri asking a named helper while a helper is in focus,
   and an approved Siri stash enter at `runToolStep`, `StudioHandoff` or `resumeStashed` instead. All of them use the
   same `run()` and SafetyGate.
 - **Source** says where a request came from: `app` (the Talk button or typing), `siriBackground` ("Ask Kairos"),
@@ -93,10 +98,11 @@ Status: *run on device* in both directions. On 31 Oct the Mac asked the real iPh
 over Tailscale (0.4 s), and the iPhone asked the Mac inside the on-phone self-test. The Talk button asking the Mac
 hasn't been tried yet.
 
-**Code:** `TempoApp/TempoApp.swift`, `TempoApp/ContentView.swift`, `Agents/Core/KairosAgent.swift`,
+**Code:** `TempoApp.swift`, `ContentView.swift`, `Agents/Core/KairosAgent.swift`,
 `Agents/Core/ModelProvider.swift`, `Agents/Mesh/MeshNode.swift`, `Agents/Hands/ICTRLHands.swift`,
-`Agents/UI/AgentVoice.swift`, `Agents/Workers/WebReader.swift`, `TempoSession.swift`; in kairos-mesh: `mesh/app.py`,
-`mesh/brain.py`, `mesh/store.py`, `mesh/ctl.py`, `node/mac_node.py`, `node/mac_tools.py`, `web/index.html`.
+`Agents/UI/AgentVoice.swift`, `Agents/Workers/WebReader.swift`, `TempoSession.swift`; the hub:
+`kairos-mesh/mesh/app.py`, `kairos-mesh/mesh/brain.py`, `kairos-mesh/mesh/store.py`, `kairos-mesh/mesh/ctl.py`,
+`kairos-mesh/node/mac_node.py`, `kairos-mesh/node/mac_tools.py`, `kairos-mesh/web/index.html`.
 
 ## 2. One request, end to end
 
@@ -325,7 +331,7 @@ screen-changing call is never re-sent after a timeout, because iCTRL may still f
 Status: *built*. On the real phone the operator connected to iCTRL and navigated, but no app read has succeeded yet.
 *Compiled only*: WhatsApp's new-design reading (86/86 checks on captured screens, in a harness kept outside the
 repo), the hand-back when iOS ends background time early, FaceTime and gallery-photo routing, and our iCTRL crash
-fixes (`Tools/iCTRL/`).
+fixes (`kairos-ios/Tools/iCTRL/`).
 
 **Code:** `Agents/Operator/PhoneOperatorAgent.swift` (`OperatorRun`, `OperatorDriver`, `OperatorPlanner`,
 `OperatorBackground`), `Agents/Operator/AppSkills.swift`, `Agents/Operator/ScreenDigest.swift`,
@@ -402,8 +408,9 @@ remote call card worked in the Simulator).
 
 **Code:** `Agents/Mesh/MeshNode.swift` (`handle`, `pair`, `run`, `work`, `ask`, `shareTurn`),
 `Agents/Mesh/DevicesAgent.swift` (`ask_my_mac`), `Agents/Core/KairosAgent.swift` (`remoteDenied`,
-`remoteAlwaysConfirm`), `ContentView.swift` (the "Join your Mac?" alert and the connection line); in kairos-mesh:
-`mesh/app.py`, `mesh/store.py`, `mesh/brain.py`, `mesh/tailnet.py`, `node/mac_node.py`, `node/mac_tools.py`.
+`remoteAlwaysConfirm`), `ContentView.swift` (the "Join your Mac?" alert and the connection line); the hub:
+`kairos-mesh/mesh/app.py`, `kairos-mesh/mesh/store.py`, `kairos-mesh/mesh/brain.py`, `kairos-mesh/mesh/tailnet.py`,
+`kairos-mesh/node/mac_node.py`, `kairos-mesh/node/mac_tools.py`.
 
 ## 7. Where data lives
 
@@ -466,4 +473,4 @@ Google, and when the phone is paired, each turn is copied to the hub on your Mac
 `Agents/Memory/ConversationStore.swift`, `Agents/Memory/MemoryContext.swift`, `Agents/Studio/AgentSpec.swift`,
 `Agents/Routines/RoutineStore.swift`, `Agents/Workers/WorkerRun.swift`, `Agents/Research/ReportStore.swift`,
 `Agents/Specialists/MoneyAgent.swift`, `Agents/Trust/OwnerPolicy.swift`, `Agents/Specialists/LetterAgent.swift`,
-`Agents/Mesh/MeshNode.swift` (`shareTurn`); in kairos-mesh: `mesh/store.py`.
+`Agents/Mesh/MeshNode.swift` (`shareTurn`); the hub: `kairos-mesh/mesh/store.py`.

@@ -13,11 +13,15 @@ commit `874f528`. Without it the runner can crash the test session on a real iPh
 - **Sturdier frame parsing.** Frames are read from the last `{{` in a description, and only finite values with a
   magnitude below 1e15 are accepted. This covers alert buttons and list rows.
 
+Status: *compiled only*. The patch builds, but the patched runner hasn't run on the phone yet.
+
+The app's side of the link is in `kairos-ios/TempoApp/Agents/Hands/` (`ICTRLHands.swift`, `ICTRLEnvelope.swift`).
+
 Apply it to a fresh checkout:
 
 ```bash
 git clone https://github.com/OpenMinis/iCTRL.git && cd iCTRL
 git checkout 874f528
-git apply /path/to/kairos-ios/Tools/iCTRL/kairos-ictrl-fixes.patch
+git apply /path/to/this-repo/kairos-ios/Tools/iCTRL/kairos-ictrl-fixes.patch
 make build
 ```
